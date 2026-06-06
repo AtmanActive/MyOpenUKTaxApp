@@ -1,9 +1,11 @@
-# Continuous build + release for Windows, macOS and Linux.
+# On-demand build + release for Windows, macOS and Linux.
 #
-# On every push to main (and on manual dispatch):
+# Triggered MANUALLY (never on push), so ordinary commits — including the
+# Cargo.lock edits rust-analyzer/Tauri make locally — do not create releases or
+# bump the version. When run:
 #   1. `prepare` bumps the version once per the project rule, commits it back to
-#      main, and creates the GitHub release/tag (pushes made with GITHUB_TOKEN do
-#      not retrigger workflows, so the bump commit cannot cause a loop).
+#      main (version.txt + all manifests + Cargo.lock so the tree stays
+#      consistent), and creates the GitHub release/tag.
 #   2. `release` builds on all three desktop platforms in parallel, renames each
 #      bundle with a windows/macos/linux + arch token, and uploads them to that
 #      one release. Windows additionally gets a portable ZIP.
@@ -11,8 +13,7 @@
 name: release
 
 on:
-  push:
-    branches: [main]
+  # Run from the Actions tab ("Run workflow") or `gh workflow run release.yml`.
   workflow_dispatch:
 
 permissions:
@@ -48,7 +49,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add version.txt package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+          git add version.txt package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
           git commit -m "chore: release v${{ steps.bump.outputs.version }} [skip ci]"
           git push origin HEAD:main
 

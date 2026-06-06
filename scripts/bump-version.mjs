@@ -3,10 +3,11 @@
 // version.txt is the single source of truth. The project versioning rule: no
 // component may be a double digit — incrementing carries to the next component
 // when one would reach 10 (…0.0.9 -> 0.1.0, …0.9.9 -> 1.0.0). The new version is
-// written back to version.txt and synced into package.json, tauri.conf.json and
-// Cargo.toml so the built artifacts all carry the same number.
+// written back to version.txt and synced into package.json, tauri.conf.json,
+// Cargo.toml AND Cargo.lock so the built artifacts all carry the same number and
+// a local cargo/rust-analyzer run does not re-dirty the lockfile afterwards.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -53,6 +54,18 @@ function update_cargo_version(cargo_text, new_version)
 		.join("\n");
 }
 
+// Update this package's own version inside Cargo.lock. The lockfile lists the
+// crate as a `[[package]]` block whose `name`/`version` lines are adjacent; only
+// that specific block is touched (not the lib `myopenuktaxapp_lib`, which keeps
+// its closing quote distinct).
+function update_cargo_lock_version(lock_text, new_version)
+{
+	return lock_text.replace(
+		/(name = "myopenuktaxapp"\r?\nversion = ")[^"]*(")/,
+		(match, prefix, suffix) => `${prefix}${new_version}${suffix}`,
+	);
+}
+
 const version_file = join(repo_root, "version.txt");
 const current_version = readFileSync(version_file, "utf8");
 const next_version = bump_version(current_version);
@@ -76,6 +89,14 @@ writeFileSync(tauri_conf_path, `${JSON.stringify(tauri_conf, null, "\t")}\n`, "u
 const cargo_path = join(repo_root, "src-tauri", "Cargo.toml");
 const cargo_text = readFileSync(cargo_path, "utf8");
 writeFileSync(cargo_path, update_cargo_version(cargo_text, next_version), "utf8");
+
+// src-tauri/Cargo.lock (the package's own entry)
+const cargo_lock_path = join(repo_root, "src-tauri", "Cargo.lock");
+if (existsSync(cargo_lock_path))
+{
+	const cargo_lock_text = readFileSync(cargo_lock_path, "utf8");
+	writeFileSync(cargo_lock_path, update_cargo_lock_version(cargo_lock_text, next_version), "utf8");
+}
 
 // Emit the new version for the workflow (and a friendly log line).
 console.log(next_version);

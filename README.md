@@ -77,10 +77,14 @@ docs/           Design docs and the development worklog
 
 ## Versioning & releases
 
-`version.txt` is the source of truth. CI bumps it on every push to `main`
-(single-digit-per-component carry: `0.0.9 → 0.1.0`), syncs the manifests, then
-builds on Windows, macOS and Linux in parallel and publishes one GitHub release
-carrying every platform's artifacts.
+`version.txt` is the source of truth. Releases are **triggered manually** — from
+the repository's **Actions → release → Run workflow**, or with
+`gh workflow run release.yml`. Ordinary pushes do **not** build or release, so
+routine commits never bump the version. Each run bumps the version
+(single-digit-per-component carry: `0.0.9 → 0.1.0`), syncs `package.json`,
+`tauri.conf.json`, `Cargo.toml` and `Cargo.lock`, commits the bump, then builds on
+Windows, macOS and Linux in parallel and publishes one GitHub release carrying
+every platform's artifacts.
 
 ## Downloads & installation
 
