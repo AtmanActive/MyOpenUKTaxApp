@@ -89,11 +89,11 @@ contains:
 
 | Platform | Artifact | Notes |
 |----------|----------|-------|
-| Windows  | `MyOpenUKTaxApp_<version>_x64-setup.exe`     | NSIS installer |
-| Windows  | `MyOpenUKTaxApp_<version>_x64_portable.zip`  | **Portable** — unzip and run `MyOpenUKTaxApp.exe`, no installation |
-| macOS    | `MyOpenUKTaxApp_<version>_universal.dmg`      | Universal (Apple Silicon + Intel) |
-| Linux    | `*_amd64.deb`                                 | Debian/Ubuntu package |
-| Linux    | `*_amd64.AppImage`                            | Portable Linux binary (`chmod +x` then run) |
+| Windows  | `MyOpenUKTaxApp_<version>_windows_x64_setup.exe`    | NSIS installer |
+| Windows  | `MyOpenUKTaxApp_<version>_windows_x64_portable.zip` | **Portable** — unzip, open the `MyOpenUKTaxApp` folder, run `MyOpenUKTaxApp.exe` (no installation) |
+| macOS    | `MyOpenUKTaxApp_<version>_macos_universal.dmg`      | Universal (Apple Silicon + Intel) |
+| Linux    | `MyOpenUKTaxApp_<version>_linux_amd64.deb`          | Debian/Ubuntu package |
+| Linux    | `MyOpenUKTaxApp_<version>_linux_amd64.AppImage`     | Portable Linux binary (`chmod +x` then run) |
 
 ### Signed vs unsigned binaries
 

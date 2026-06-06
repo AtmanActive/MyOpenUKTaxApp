@@ -1,14 +1,12 @@
 # Continuous build + release for Windows, macOS and Linux.
 #
 # On every push to main (and on manual dispatch):
-#   1. `prepare` bumps the version once per the project rule and commits it back
-#      to main (pushes made with GITHUB_TOKEN do not retrigger workflows, so the
-#      bump commit cannot cause a loop).
-#   2. `release` then builds on all three desktop platforms in parallel and every
-#      job uploads its native installers to the SAME GitHub release/tag.
-#
-# Because the bump happens in a single prepare job, the three build jobs check
-# out the already-bumped main and therefore share one version/tag.
+#   1. `prepare` bumps the version once per the project rule, commits it back to
+#      main, and creates the GitHub release/tag (pushes made with GITHUB_TOKEN do
+#      not retrigger workflows, so the bump commit cannot cause a loop).
+#   2. `release` builds on all three desktop platforms in parallel, renames each
+#      bundle with a windows/macos/linux + arch token, and uploads them to that
+#      one release. Windows additionally gets a portable ZIP.
 
 name: release
 
@@ -54,6 +52,19 @@ jobs:
           git commit -m "chore: release v${{ steps.bump.outputs.version }} [skip ci]"
           git push origin HEAD:main
 
+      # Create the release up front so every matrix job uploads to the same tag.
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.bump.outputs.version }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "MyOpenUKTaxApp $TAG" \
+              --notes "Automated build of MyOpenUKTaxApp for Windows, macOS and Linux." \
+              --target main
+          fi
+
   release:
     needs: prepare
     strategy:
@@ -64,16 +75,23 @@ jobs:
         include:
           # A universal macOS binary (Apple Silicon + Intel), packaged as .app/.dmg.
           - platform: macos-latest
+            os_label: macos
+            arch: universal
             args: "--target universal-apple-darwin --bundles app,dmg"
           # Linux: the two widely-used, reliably-buildable formats.
           - platform: ubuntu-22.04
+            os_label: linux
+            arch: amd64
             args: "--bundles deb,appimage"
-          # Windows: NSIS installer (setup.exe). A plain "portable" ZIP is added
-          # in a follow-up step. MSI/WiX is intentionally skipped to stay reliable.
+          # Windows: NSIS installer (setup.exe); a portable ZIP is added below.
           - platform: windows-latest
+            os_label: windows
+            arch: x64
             args: "--bundles nsis"
 
     runs-on: ${{ matrix.platform }}
+    env:
+      TAG: v${{ needs.prepare.outputs.version }}
 
     steps:
       - name: Checkout (the version-bumped main)
@@ -116,23 +134,28 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and publish release
+      # Build only (no tagName) so tauri-action compiles + bundles and exposes the
+      # produced file paths via its `artifactPaths` output without publishing.
+      - name: Build the app
+        id: tauri
         uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # All three jobs target the same tag/release; tauri-action creates it
-          # on first upload and appends the rest.
-          tagName: v__VERSION__
-          releaseName: "MyOpenUKTaxApp v__VERSION__"
-          releaseBody: "Automated build of MyOpenUKTaxApp for Windows, macOS and Linux."
-          releaseDraft: false
-          prerelease: false
           args: ${{ matrix.args }}
 
+      # Rename each bundle with a platform/arch token and upload to the release.
+      - name: Rename and upload platform artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          OS_LABEL: ${{ matrix.os_label }}
+          ARCH: ${{ matrix.arch }}
+          TAG: ${{ env.TAG }}
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: node scripts/publish-artifacts.mjs
+
       # Windows "portable" distribution. Tauri has no native Windows ZIP target,
-      # so we zip the compiled standalone executable (it stores all of its data
-      # next to itself) and attach it to the same release as the NSIS installer.
+      # so we zip the compiled standalone executable inside a MyOpenUKTaxApp/
+      # folder (it stores all of its data next to itself) and attach it.
       - name: Package and upload Windows portable ZIP
         if: matrix.platform == 'windows-latest'
         shell: pwsh
@@ -140,8 +163,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $version = "${{ needs.prepare.outputs.version }}"
-          New-Item -ItemType Directory -Force -Path portable | Out-Null
-          Copy-Item "src-tauri/target/release/myopenuktaxapp.exe" "portable/MyOpenUKTaxApp.exe"
-          $zip = "MyOpenUKTaxApp_${version}_x64_portable.zip"
-          Compress-Archive -Path "portable/*" -DestinationPath $zip -Force
-          gh release upload "v$version" $zip --clobber
+          $root = "MyOpenUKTaxApp"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Copy-Item "src-tauri/target/release/myopenuktaxapp.exe" "$root/MyOpenUKTaxApp.exe"
+          $zip = "MyOpenUKTaxApp_${version}_windows_x64_portable.zip"
+          Compress-Archive -Path $root -DestinationPath $zip -Force
+          gh release upload "$env:TAG" $zip --clobber
