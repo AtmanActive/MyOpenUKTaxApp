@@ -78,8 +78,46 @@ docs/           Design docs and the development worklog
 ## Versioning & releases
 
 `version.txt` is the source of truth. CI bumps it on every push to `main`
-(single-digit-per-component carry: `0.0.9 → 0.1.0`), syncs the manifests, builds,
-and publishes a GitHub release.
+(single-digit-per-component carry: `0.0.9 → 0.1.0`), syncs the manifests, then
+builds on Windows, macOS and Linux in parallel and publishes one GitHub release
+carrying every platform's artifacts.
+
+## Downloads & installation
+
+Each [GitHub release](https://github.com/AtmanActive/MyOpenUKTaxApp/releases)
+contains:
+
+| Platform | Artifact | Notes |
+|----------|----------|-------|
+| Windows  | `MyOpenUKTaxApp_<version>_x64-setup.exe`     | NSIS installer |
+| Windows  | `MyOpenUKTaxApp_<version>_x64_portable.zip`  | **Portable** — unzip and run `MyOpenUKTaxApp.exe`, no installation |
+| macOS    | `MyOpenUKTaxApp_<version>_universal.dmg`      | Universal (Apple Silicon + Intel) |
+| Linux    | `*_amd64.deb`                                 | Debian/Ubuntu package |
+| Linux    | `*_amd64.AppImage`                            | Portable Linux binary (`chmod +x` then run) |
+
+### Signed vs unsigned binaries
+
+These releases are currently **unsigned** — the project does not yet have code
+-signing certificates. The software is safe, but because it is not signed by a
+recognised certificate authority, the operating system will show a warning the
+first time you run it. This is expected; here is how to proceed on each platform:
+
+- **Windows** (installer and portable `.exe`) — Microsoft Defender SmartScreen
+  shows *“Windows protected your PC.”* Click **More info → Run anyway**.
+- **macOS** (`.dmg`) — the app is unsigned and un-notarized, so Gatekeeper says
+  the developer *“cannot be verified”* (or that the app *“is damaged”*).
+  Right-click the app and choose **Open** the first time, or clear the quarantine
+  flag from Terminal:
+  ```bash
+  xattr -dr com.apple.quarantine /Applications/MyOpenUKTaxApp.app
+  ```
+- **Linux** (`.deb` / `.AppImage`) — Linux does not gate unsigned desktop apps the
+  same way. For the AppImage, just make it executable: `chmod +x MyOpenUKTaxApp_*.AppImage`.
+
+**Planned:** proper signing will remove these warnings — Authenticode signing on
+Windows and Apple Developer signing + notarization on macOS — once the
+certificates are available. They will be wired into CI as encrypted repository
+secrets (no private keys in the repo).
 
 ## License
 

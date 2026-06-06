@@ -20,6 +20,12 @@ on:
 permissions:
   contents: write
 
+# Serialise release runs so two pushes cannot bump the version or create the
+# same release concurrently; later runs queue rather than race.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -62,7 +68,8 @@ jobs:
           # Linux: the two widely-used, reliably-buildable formats.
           - platform: ubuntu-22.04
             args: "--bundles deb,appimage"
-          # Windows: NSIS installer (MSI/WiX is intentionally skipped to stay reliable).
+          # Windows: NSIS installer (setup.exe). A plain "portable" ZIP is added
+          # in a follow-up step. MSI/WiX is intentionally skipped to stay reliable.
           - platform: windows-latest
             args: "--bundles nsis"
 
@@ -122,3 +129,19 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      # Windows "portable" distribution. Tauri has no native Windows ZIP target,
+      # so we zip the compiled standalone executable (it stores all of its data
+      # next to itself) and attach it to the same release as the NSIS installer.
+      - name: Package and upload Windows portable ZIP
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = "${{ needs.prepare.outputs.version }}"
+          New-Item -ItemType Directory -Force -Path portable | Out-Null
+          Copy-Item "src-tauri/target/release/myopenuktaxapp.exe" "portable/MyOpenUKTaxApp.exe"
+          $zip = "MyOpenUKTaxApp_${version}_x64_portable.zip"
+          Compress-Archive -Path "portable/*" -DestinationPath $zip -Force
+          gh release upload "v$version" $zip --clobber
