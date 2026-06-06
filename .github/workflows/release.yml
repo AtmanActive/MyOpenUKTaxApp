@@ -1,9 +1,14 @@
-# Continuous build + release.
+# Continuous build + release for Windows, macOS and Linux.
 #
-# On every push to main (and on manual dispatch) this bumps the version per the
-# project rule, commits the bump back, builds the Tauri app and publishes a
-# GitHub release with the installer attached. Pushes made with GITHUB_TOKEN do
-# not retrigger workflows, so the bump commit cannot cause an infinite loop.
+# On every push to main (and on manual dispatch):
+#   1. `prepare` bumps the version once per the project rule and commits it back
+#      to main (pushes made with GITHUB_TOKEN do not retrigger workflows, so the
+#      bump commit cannot cause a loop).
+#   2. `release` then builds on all three desktop platforms in parallel and every
+#      job uploads its native installers to the SAME GitHub release/tag.
+#
+# Because the bump happens in a single prepare job, the three build jobs check
+# out the already-bumped main and therefore share one version/tag.
 
 name: release
 
@@ -16,9 +21,10 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    runs-on: windows-latest
-
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,10 +35,71 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Bump version (version.txt + manifests)
+        id: bump
+        run: node scripts/bump-version.mjs
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.txt package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+          git commit -m "chore: release v${{ steps.bump.outputs.version }} [skip ci]"
+          git push origin HEAD:main
+
+  release:
+    needs: prepare
+    strategy:
+      # Build every platform even if one fails, so a single broken target does
+      # not deprive the release of the others.
+      fail-fast: false
+      matrix:
+        include:
+          # A universal macOS binary (Apple Silicon + Intel), packaged as .app/.dmg.
+          - platform: macos-latest
+            args: "--target universal-apple-darwin --bundles app,dmg"
+          # Linux: the two widely-used, reliably-buildable formats.
+          - platform: ubuntu-22.04
+            args: "--bundles deb,appimage"
+          # Windows: NSIS installer (MSI/WiX is intentionally skipped to stay reliable).
+          - platform: windows-latest
+            args: "--bundles nsis"
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout (the version-bumped main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      # Tauri's Linux build needs the WebKitGTK / GTK / AppIndicator dev headers.
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl wget file libssl-dev
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
           cache: npm
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS needs both arch targets to assemble the universal binary.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache Rust build
         uses: swatinem/rust-cache@v2
@@ -42,26 +109,16 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Bump version (version.txt + manifests)
-        id: bump
-        run: node scripts/bump-version.mjs
-
-      - name: Commit version bump
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add version.txt package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
-          git commit -m "chore: release v${{ steps.bump.outputs.version }} [skip ci]"
-          git push origin HEAD:main
-
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # All three jobs target the same tag/release; tauri-action creates it
+          # on first upload and appends the rest.
           tagName: v__VERSION__
           releaseName: "MyOpenUKTaxApp v__VERSION__"
-          releaseBody: "Automated build of MyOpenUKTaxApp."
+          releaseBody: "Automated build of MyOpenUKTaxApp for Windows, macOS and Linux."
           releaseDraft: false
           prerelease: false
+          args: ${{ matrix.args }}
