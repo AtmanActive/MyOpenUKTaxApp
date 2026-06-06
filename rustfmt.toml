@@ -1,0 +1,12 @@
+# rustfmt configuration aligned with the project coding standard.
+#
+# `hard_tabs` is a stable option and gives us tab indentation. The Allman brace
+# style ("braces on their own line") that the standard asks for maps to the
+# `brace_style`/`control_brace_style` options, which are nightly-only in rustfmt.
+# They are listed here so that running `cargo +nightly fmt` produces the intended
+# Allman layout; on stable they are ignored and the hand-written Allman bracing
+# in the source is preserved as-is (rustfmt on stable will not move them).
+hard_tabs = true
+brace_style = "AlwaysNextLine"
+control_brace_style = "AlwaysNextLine"
+where_single_line = true

@@ -1,0 +1,45 @@
+[package]
+name = "myopenuktaxapp"
+version = "0.0.0"
+description = "UK HMRC MTD desktop application for the self-employed"
+authors = ["AtmanActive"]
+license = "MIT"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "myopenuktaxapp_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SQLite via rusqlite. The "bundled" feature compiles SQLite from source so the
+# portable build has no external/system database dependency.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Timestamps for ledger events, log filenames, backup filenames and HMRC periods.
+chrono = { version = "0.4", features = ["serde"] }
+
+# HTTP client for the HMRC MTD API. rustls avoids an OpenSSL system dependency,
+# keeping the build self-contained and portable.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Ergonomic error enum derivation for the central AppError type.
+thiserror = "2"
+
+# Minimal synchronous HTTP server used to host the embedded MCP endpoint.
+tiny_http = "0.12"
+
+# URL-encoding helper for building OAuth authorize/token requests.
+urlencoding = "2"

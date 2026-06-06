@@ -1,0 +1,128 @@
+/*
+ * Global stylesheet and design tokens for MyOpenUKTaxApp.
+ *
+ * Colours are expressed as HSL channel triplets in CSS custom properties so the
+ * theme provider can switch between light and dark by toggling the `.dark` class
+ * on <html>. The font-size provider scales the whole UI by setting the root
+ * font-size, because every spacing/size token below is expressed in rem units.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+	:root {
+		--background: 0 0% 100%;
+		--foreground: 240 10% 3.9%;
+
+		--card: 0 0% 100%;
+		--card-foreground: 240 10% 3.9%;
+
+		--popover: 0 0% 100%;
+		--popover-foreground: 240 10% 3.9%;
+
+		--primary: 221 83% 53%;
+		--primary-foreground: 0 0% 98%;
+
+		--secondary: 240 4.8% 95.9%;
+		--secondary-foreground: 240 5.9% 10%;
+
+		--muted: 240 4.8% 95.9%;
+		--muted-foreground: 240 3.8% 46.1%;
+
+		--accent: 240 4.8% 95.9%;
+		--accent-foreground: 240 5.9% 10%;
+
+		--destructive: 0 72% 51%;
+		--destructive-foreground: 0 0% 98%;
+
+		--border: 240 5.9% 90%;
+		--input: 240 5.9% 90%;
+		--ring: 221 83% 53%;
+
+		/* Income is green, expenses are red; the Add Event tab-switch recolours from these. */
+		--income: 142 71% 45%;
+		--income-foreground: 0 0% 100%;
+		--expense: 0 72% 51%;
+		--expense-foreground: 0 0% 100%;
+
+		--radius: 0.5rem;
+	}
+
+	.dark {
+		--background: 240 10% 3.9%;
+		--foreground: 0 0% 98%;
+
+		--card: 240 10% 5.9%;
+		--card-foreground: 0 0% 98%;
+
+		--popover: 240 10% 3.9%;
+		--popover-foreground: 0 0% 98%;
+
+		--primary: 217 91% 60%;
+		--primary-foreground: 240 5.9% 10%;
+
+		--secondary: 240 3.7% 15.9%;
+		--secondary-foreground: 0 0% 98%;
+
+		--muted: 240 3.7% 15.9%;
+		--muted-foreground: 240 5% 64.9%;
+
+		--accent: 240 3.7% 15.9%;
+		--accent-foreground: 0 0% 98%;
+
+		--destructive: 0 63% 31%;
+		--destructive-foreground: 0 0% 98%;
+
+		--border: 240 3.7% 15.9%;
+		--input: 240 3.7% 15.9%;
+		--ring: 217 91% 60%;
+
+		--income: 142 69% 58%;
+		--income-foreground: 240 10% 3.9%;
+		--expense: 0 84% 60%;
+		--expense-foreground: 240 10% 3.9%;
+	}
+}
+
+@layer base {
+	* {
+		@apply border-border;
+	}
+
+	html,
+	body,
+	#root {
+		height: 100%;
+	}
+
+	body {
+		@apply bg-background text-foreground;
+		margin: 0;
+		font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+		/* Prevent text selection from feeling like a web page; this is a desktop app. */
+		-webkit-user-select: none;
+		user-select: none;
+		overflow: hidden;
+	}
+
+	/* Re-enable selection inside data tables and text inputs where it is useful. */
+	input,
+	textarea,
+	table {
+		-webkit-user-select: text;
+		user-select: text;
+	}
+
+	/* Material Symbols base sizing; the actual glyph is supplied per-element. */
+	.material-symbols-outlined {
+		font-variation-settings:
+			"FILL" 0,
+			"wght" 400,
+			"GRAD" 0,
+			"opsz" 24;
+		line-height: 1;
+		user-select: none;
+	}
+}

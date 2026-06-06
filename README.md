@@ -1,2 +1,86 @@
 # MyOpenUKTaxApp
-UK HMRC MTD desktop application for self-employed
+
+UK HMRC MTD desktop application for the self-employed.
+
+A portable, cross-platform desktop app for simple self-employment accounting
+(income & expenses) that can submit quarterly data directly to
+[HMRC Making Tax Digital for Income Tax](https://www.gov.uk/government/collections/making-tax-digital-for-income-tax)
+via the [HMRC API](https://developer.service.hmrc.gov.uk/api-documentation).
+
+## Stack
+
+- **Tauri 2** desktop shell (Rust backend)
+- **Vite + React + TypeScript + Tailwind CSS** (shadcn/ui-style components)
+- **SQLite** (rusqlite) for storage, accessed through a Rust data layer
+- Embedded **MCP server** so an AI agent can query/control the app while it runs
+
+## Portability
+
+The app is self-contained: it discovers its own executable directory and keeps
+**all** data beside the executable — never in OS-specific folders.
+
+```
+<app folder>/
+  MyOpenUKTaxApp(.exe)
+  MyOpenUKTaxApp.settings.json
+  Data/MyOpenUKTaxApp.db
+  Data/Backups/
+  Logs/Action/  Logs/Debug/  Logs/Network/
+```
+
+In development these are created under `src-tauri/target/debug/`.
+
+## Prerequisites
+
+- Node.js 20+ and npm
+- Rust (stable, MSVC toolchain on Windows)
+- Platform Tauri prerequisites — see <https://tauri.app/start/prerequisites/>
+  (on Windows: Microsoft Visual Studio C++ Build Tools and the WebView2 runtime)
+
+## Develop
+
+```bash
+npm install
+npm run tauri dev        # launch the app with hot reload
+```
+
+## Verify
+
+```bash
+npm run build                                   # typecheck + build the frontend
+cargo check --manifest-path src-tauri/Cargo.toml # type-check the Rust backend
+```
+
+## Build a release locally
+
+```bash
+npm run tauri build      # produces the installer under src-tauri/target/release
+```
+
+## HMRC setup
+
+Register an application on the
+[HMRC Developer Hub](https://developer.service.hmrc.gov.uk/), then enter the
+client id/secret, redirect URI, your National Insurance number and MTD business
+id on the in-app **Settings** screen. Credentials are stored only in the local,
+git-ignored `MyOpenUKTaxApp.settings.json` — never in source control.
+
+## Project layout
+
+```
+src/            React + TypeScript frontend (sections, components, lib, store)
+src-tauri/      Rust backend (paths, settings, logging, db, hmrc, commands, mcp)
+scripts/        Build/versioning helpers
+docs/           Design docs and the development worklog
+.github/        CI/CD release workflow
+```
+
+## Versioning & releases
+
+`version.txt` is the source of truth. CI bumps it on every push to `main`
+(single-digit-per-component carry: `0.0.9 → 0.1.0`), syncs the manifests, builds,
+and publishes a GitHub release.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
