@@ -1,6 +1,6 @@
 [package]
 name = "myopenuktaxapp"
-version = "0.0.0"
+version = "0.0.1"
 description = "UK HMRC MTD desktop application for the self-employed"
 authors = ["AtmanActive"]
 license = "MIT"

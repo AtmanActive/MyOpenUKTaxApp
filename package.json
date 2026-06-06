@@ -1,7 +1,7 @@
 {
 	"name": "myopenuktaxapp",
 	"private": true,
-	"version": "0.0.0",
+	"version": "0.0.1",
 	"type": "module",
 	"description": "UK HMRC MTD desktop application for the self-employed",
 	"license": "MIT",
