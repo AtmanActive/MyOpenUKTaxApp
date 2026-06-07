@@ -4,6 +4,7 @@
 // sidebar, topbar and sections can share it without prop drilling.
 
 import { create } from "zustand";
+import type { LedgerEvent } from "@/lib/types";
 
 export type SectionId =
 	| "dashboard"
@@ -50,6 +51,13 @@ interface AppUiState
 	new_event: () => void;
 	set_search_term: (term: string) => void;
 	set_date_range: (from: string, to: string) => void;
+	// Clear the whole filter (search term + date range).
+	clear_filter: () => void;
+
+	// Up to three most-recently created events this session (newest first), shown
+	// as feedback under the Add Event form. In-memory only; not persisted.
+	recent_events: LedgerEvent[];
+	add_recent_event: (event: LedgerEvent) => void;
 }
 
 export const use_app_store = create<AppUiState>((set) => ({
@@ -64,4 +72,9 @@ export const use_app_store = create<AppUiState>((set) => ({
 	new_event: () => set({ active_section: "add-event", selected_event_id: null }),
 	set_search_term: (term) => set({ search_term: term }),
 	set_date_range: (from, to) => set({ date_from: from, date_to: to }),
+	clear_filter: () => set({ search_term: "", date_from: "", date_to: "" }),
+
+	recent_events: [],
+	add_recent_event: (event) =>
+		set((state) => ({ recent_events: [event, ...state.recent_events].slice(0, 3) })),
 }));

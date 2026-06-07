@@ -68,18 +68,25 @@ pub fn run()
 			commands::events::get_event,
 			commands::events::create_event,
 			commands::events::delete_event,
+			commands::events::last_used_subcategories,
 			commands::mappings::list_category_mappings,
 			commands::mappings::set_category_mapping,
 			commands::mappings::delete_category_mapping,
 			commands::dashboard::get_dashboard_summary,
 			commands::settings_cmds::get_settings,
 			commands::settings_cmds::update_settings,
+			commands::settings_cmds::restart_app,
+			commands::settings_cmds::open_data_directory,
+			commands::settings_cmds::open_logs_directory,
+			commands::app_cmds::app_info,
+			commands::app_cmds::check_latest_version,
 			commands::hmrc_cmds::list_hmrc_categories,
 			commands::hmrc_cmds::list_hmrc_submissions,
+			commands::hmrc_cmds::hmrc_list_businesses,
 			commands::hmrc_cmds::hmrc_status,
-			commands::hmrc_cmds::hmrc_authorize_url,
+			commands::hmrc_cmds::hmrc_redirect_uris,
+			commands::hmrc_cmds::hmrc_authorize,
 			commands::hmrc_cmds::hmrc_hello_world,
-			commands::hmrc_cmds::hmrc_exchange_code,
 			commands::hmrc_cmds::hmrc_refresh_token,
 			commands::hmrc_cmds::hmrc_submit_period,
 		])
@@ -104,8 +111,10 @@ fn initialize() -> AppResult<AppState>
 		settings.save(&paths)?;
 	}
 
-	// Prune stale logs before opening this session's log files.
+	// Prune stale logs and clear out any zero-byte logs left by older versions
+	// before this session's (lazily-created) log files begin.
 	logging::prune_old_logs(&paths, settings.logs_pruned_after_days)?;
+	logging::remove_empty_logs(&paths)?;
 	let logger = Arc::new(Logger::new(&paths)?);
 
 	// Open and migrate the database with the configured backup/retention tuning.

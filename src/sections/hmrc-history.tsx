@@ -1,12 +1,11 @@
 // Section 6 - HMRC post history and connection.
 //
 // Top: the HMRC connection state and the actions to connect (test connectivity,
-// authorise in the browser, exchange the returned code, refresh the token) and
-// to submit a quarterly period. Bottom: the history of submissions, expandable
-// to inspect the exact request/response JSON.
+// one-click authorise via a local loopback redirect, refresh the token) and to
+// submit a quarterly period. Bottom: the history of submissions, expandable to
+// inspect the exact request/response JSON.
 
 import { Fragment, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -33,7 +32,6 @@ export function HmrcHistorySection()
 	const set_active_section = use_app_store((state) => state.set_active_section);
 	const query_client = useQueryClient();
 
-	const [auth_code, set_auth_code] = useState("");
 	const [period_from, set_period_from] = useState("");
 	const [period_to, set_period_to] = useState("");
 	const [expanded_id, set_expanded_id] = useState<number | null>(null);
@@ -52,12 +50,11 @@ export function HmrcHistorySection()
 		onError: (error) => notify_error(error),
 	});
 
-	const exchange_mutation = useMutation({
-		mutationFn: () => api.hmrc_exchange_code(auth_code.trim()),
+	const authorize_mutation = useMutation({
+		mutationFn: () => api.hmrc_authorize(),
 		onSuccess: () =>
 		{
 			push("success", "Authorised — access token stored.");
-			set_auth_code("");
 			refresh_status();
 		},
 		onError: (error) => notify_error(error),
@@ -89,21 +86,6 @@ export function HmrcHistorySection()
 		},
 		onError: (error) => notify_error(error),
 	});
-
-	// Fetch the authorise URL and open it in the system browser.
-	const authorize = async () =>
-	{
-		try
-		{
-			const url = await api.hmrc_authorize_url();
-			await openUrl(url);
-			push("info", "Opened HMRC sign-in in your browser. Paste the returned code below.");
-		}
-		catch (error)
-		{
-			notify_error(error);
-		}
-	};
 
 	const status = status_query.data;
 
@@ -138,29 +120,26 @@ export function HmrcHistorySection()
 								<Button variant="outline" title="Check connectivity to HMRC (no sign-in needed)" onClick={() => test_mutation.mutate()} disabled={test_mutation.isPending}>
 									<Icon name="wifi_tethering" /> Test connection
 								</Button>
-								<Button variant="outline" title="Open HMRC sign-in to authorise this app" onClick={() => void authorize()} disabled={!status.configured}>
-									<Icon name="open_in_new" /> Authorise
+								<Button
+									title="Sign in to HMRC in your browser; the app captures the result automatically"
+									onClick={() => authorize_mutation.mutate()}
+									disabled={!status.configured || authorize_mutation.isPending}
+								>
+									<Icon name="login" />
+									{authorize_mutation.isPending ? "Waiting for sign-in…" : "Authorise with HMRC"}
 								</Button>
 								<Button variant="outline" title="Refresh the access token" onClick={() => refresh_token_mutation.mutate()} disabled={!status.has_token || refresh_token_mutation.isPending}>
 									<Icon name="autorenew" /> Refresh token
 								</Button>
 							</div>
 
-							<div className="flex flex-col gap-1.5 sm:flex-row sm:items-end">
-								<div className="flex flex-1 flex-col gap-1.5">
-									<Label htmlFor="auth_code">Authorisation code</Label>
-									<Input
-										id="auth_code"
-										title="Paste the code HMRC returned after sign-in"
-										placeholder="Paste the code from the browser redirect"
-										value={auth_code}
-										onChange={(event) => set_auth_code(event.target.value)}
-									/>
-								</div>
-								<Button title="Exchange the code for an access token" onClick={() => exchange_mutation.mutate()} disabled={!auth_code.trim() || exchange_mutation.isPending}>
-									<Icon name="key" /> Exchange code
-								</Button>
-							</div>
+							{authorize_mutation.isPending ? (
+								<p className="flex items-center gap-2 text-sm text-muted-foreground">
+									<Icon name="open_in_new" className="text-base" />
+									Complete the sign-in in your browser — this screen is waiting for HMRC to
+									redirect back, then it finishes automatically.
+								</p>
+							) : null}
 						</>
 					)}
 				</CardContent>

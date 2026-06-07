@@ -4,6 +4,7 @@
 // invokes by name. All commands use `rename_all = "snake_case"` so the argument
 // keys passed from TypeScript match the project's snake_case naming standard.
 
+pub mod app_cmds;
 pub mod dashboard;
 pub mod events;
 pub mod hmrc_cmds;

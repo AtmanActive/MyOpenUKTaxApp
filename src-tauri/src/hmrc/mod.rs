@@ -23,6 +23,18 @@ const PRODUCTION_BASE_URL: &str = "https://api.service.hmrc.gov.uk";
 // OAuth scopes required for MTD Income Tax Self Assessment.
 const OAUTH_SCOPE: &str = "read:self-assessment write:self-assessment";
 
+// Fixed path the local OAuth redirect listener serves.
+pub const OAUTH_REDIRECT_PATH: &str = "/oauth/callback";
+
+// Build the loopback redirect URI for a port. We use "localhost" (not 127.0.0.1)
+// because the HMRC Developer Hub rejects raw-IP redirect URIs; the listener is
+// bound to the IPv4 loopback (127.0.0.1) and browsers resolve/fall back
+// "localhost" to it, so the redirect still lands on the listener.
+pub fn redirect_uri_for_port(port: u16) -> String
+{
+	format!("http://localhost:{port}{OAUTH_REDIRECT_PATH}")
+}
+
 // The result of an HMRC API call: HTTP status plus the parsed JSON body (or a
 // string wrapper if the body was not valid JSON).
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +179,27 @@ impl HmrcClient
 			"/hello/world",
 			"application/vnd.hmrc.1.0+json",
 			None,
+			None,
+			device_id,
+		)
+		.await
+	}
+
+	// List all businesses on the taxpayer's HMRC record. Used by the Settings
+	// screen to let the user pick their Business ID instead of typing it.
+	pub async fn list_businesses(
+		&self,
+		access_token: &str,
+		national_insurance_number: &str,
+		device_id: &str,
+	) -> AppResult<HmrcApiResult>
+	{
+		let path = format!("/individuals/business/details/{national_insurance_number}/list");
+		self.send(
+			reqwest::Method::GET,
+			&path,
+			"application/vnd.hmrc.1.0+json",
+			Some(access_token),
 			None,
 			device_id,
 		)

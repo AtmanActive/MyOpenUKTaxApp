@@ -6,19 +6,23 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+	AppInfo,
 	CategoryMapping,
 	DashboardSummary,
 	EventFilter,
 	HmrcApiResult,
+	HmrcBusiness,
 	HmrcCategory,
 	HmrcStatus,
 	HmrcSubmission,
 	Kind,
+	LastUsedSubcategories,
 	LedgerEvent,
 	NewCategoryMapping,
 	NewLedgerEvent,
 	Settings,
 	Subcategory,
+	UpdateCheck,
 } from "@/lib/types";
 
 export const api = {
@@ -38,6 +42,8 @@ export const api = {
 	create_event: (input: NewLedgerEvent) =>
 		invoke<LedgerEvent>("create_event", { input }),
 	delete_event: (id: number) => invoke<void>("delete_event", { id }),
+	last_used_subcategories: () =>
+		invoke<LastUsedSubcategories>("last_used_subcategories"),
 
 	// ---- Category mappings ----
 	list_category_mappings: () =>
@@ -58,17 +64,27 @@ export const api = {
 	get_settings: () => invoke<Settings>("get_settings"),
 	update_settings: (settings: Settings) =>
 		invoke<Settings>("update_settings", { settings }),
+	// Restarts the app so startup-only settings (the MCP server) take effect.
+	restart_app: () => invoke<void>("restart_app"),
+	// Open the portable Data / Logs folders in the OS file explorer.
+	open_data_directory: () => invoke<void>("open_data_directory"),
+	open_logs_directory: () => invoke<void>("open_logs_directory"),
+
+	// ---- App info & updates ----
+	app_info: () => invoke<AppInfo>("app_info"),
+	check_latest_version: () => invoke<UpdateCheck>("check_latest_version"),
 
 	// ---- HMRC ----
 	list_hmrc_categories: (kind?: Kind) =>
 		invoke<HmrcCategory[]>("list_hmrc_categories", { kind: kind ?? null }),
 	list_hmrc_submissions: () =>
 		invoke<HmrcSubmission[]>("list_hmrc_submissions"),
+	hmrc_list_businesses: () => invoke<HmrcBusiness[]>("hmrc_list_businesses"),
 	hmrc_status: () => invoke<HmrcStatus>("hmrc_status"),
-	hmrc_authorize_url: () => invoke<string>("hmrc_authorize_url"),
+	hmrc_redirect_uris: () => invoke<string[]>("hmrc_redirect_uris"),
+	// Runs the full loopback authorise flow; resolves once tokens are stored.
+	hmrc_authorize: () => invoke<HmrcStatus>("hmrc_authorize"),
 	hmrc_hello_world: () => invoke<HmrcApiResult>("hmrc_hello_world"),
-	hmrc_exchange_code: (code: string) =>
-		invoke<HmrcStatus>("hmrc_exchange_code", { code }),
 	hmrc_refresh_token: () => invoke<HmrcStatus>("hmrc_refresh_token"),
 	hmrc_submit_period: (period_from: string, period_to: string) =>
 		invoke<HmrcSubmission>("hmrc_submit_period", { period_from, period_to }),

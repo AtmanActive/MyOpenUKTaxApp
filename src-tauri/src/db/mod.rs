@@ -519,6 +519,25 @@ impl Database
 		Ok(())
 	}
 
+	// The subcategory of the most recently created event of a kind ("last used"),
+	// or None if no events of that kind exist yet. Ordered by id so it reflects
+	// creation order rather than the user-set event date.
+	pub fn last_used_subcategory_id(&self, kind: &str) -> AppResult<Option<i64>>
+	{
+		validate_kind(kind)?;
+		let result = self.connection.query_row(
+			"SELECT subcategory_id FROM ledger_events WHERE kind = ?1 ORDER BY id DESC LIMIT 1",
+			params![kind],
+			|row| row.get::<_, i64>(0),
+		);
+		match result
+		{
+			Ok(id) => Ok(Some(id)),
+			Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+			Err(error) => Err(error.into()),
+		}
+	}
+
 	// ---- HMRC categories (read-only to the user) --------------------------
 
 	// List the HMRC categories cached locally, optionally filtered by kind.

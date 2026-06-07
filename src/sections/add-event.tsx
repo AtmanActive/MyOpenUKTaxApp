@@ -14,8 +14,16 @@ import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import {
+	Table,
+	TableBody,
+	TableCell,
+	TableHead,
+	TableHeader,
+	TableRow,
+} from "@/components/ui/table";
 import { api } from "@/lib/api";
-import { parse_pounds_to_pence, today_iso } from "@/lib/format";
+import { format_money_from_pence, parse_pounds_to_pence, today_iso } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Kind } from "@/lib/types";
 import { use_app_store } from "@/store/app-store";
@@ -40,6 +48,8 @@ export function AddEventSection()
 {
 	const selected_event_id = use_app_store((state) => state.selected_event_id);
 	const new_event = use_app_store((state) => state.new_event);
+	const recent_events = use_app_store((state) => state.recent_events);
+	const add_recent_event = use_app_store((state) => state.add_recent_event);
 	const push = use_notify((state) => state.push);
 	const query_client = useQueryClient();
 
@@ -54,6 +64,29 @@ export function AddEventSection()
 	const kind_subcategories = (subcategories_query.data ?? []).filter(
 		(item) => item.kind === form.kind,
 	);
+
+	// The last-used subcategory per kind, used to pre-select the dropdown.
+	const last_used_query = useQuery({
+		queryKey: ["last_used_subcategories"],
+		queryFn: () => api.last_used_subcategories(),
+	});
+
+	// Choose which subcategory to pre-select for a kind: the last-used one if it
+	// still exists, otherwise the first available (0 only when none exist).
+	const pick_subcategory_for = (kind: Kind): number =>
+	{
+		const candidates = (subcategories_query.data ?? []).filter((item) => item.kind === kind);
+		if (candidates.length === 0)
+		{
+			return 0;
+		}
+		const last_used = last_used_query.data ? last_used_query.data[kind] : null;
+		if (last_used && candidates.some((item) => item.id === last_used))
+		{
+			return last_used;
+		}
+		return candidates[0].id;
+	};
 
 	// The event being viewed/cloned, fetched only when an id is selected.
 	const event_query = useQuery({
@@ -89,14 +122,35 @@ export function AddEventSection()
 		}
 	}, [selected_event_id, event_query.data]);
 
-	// Switch Income/Expense tab; clears the subcategory since the list changes.
+	// Never leave the category unselected. When the current choice is not valid
+	// for the active kind (initial load, after a tab switch, after a reset),
+	// pre-select the last-used category, falling back to the first available.
+	useEffect(() =>
+	{
+		if (is_readonly || kind_subcategories.length === 0)
+		{
+			return;
+		}
+		const already_valid = kind_subcategories.some((item) => item.id === form.subcategory_id);
+		if (already_valid)
+		{
+			return;
+		}
+		const desired = pick_subcategory_for(form.kind);
+		if (desired !== 0)
+		{
+			set_form((current) => ({ ...current, subcategory_id: desired }));
+		}
+	}, [form.kind, form.subcategory_id, is_readonly, subcategories_query.data, last_used_query.data]);
+
+	// Switch Income/Expense tab; pre-select that kind's last-used (or first) category.
 	const switch_kind = (kind: Kind) =>
 	{
 		if (is_readonly)
 		{
 			return;
 		}
-		set_form((current) => ({ ...current, kind, subcategory_id: 0 }));
+		set_form((current) => ({ ...current, kind, subcategory_id: pick_subcategory_for(kind) }));
 	};
 
 	const create_mutation = useMutation({
@@ -119,14 +173,22 @@ export function AddEventSection()
 				note: form.note,
 			});
 		},
-		onSuccess: () =>
+		onSuccess: (saved) =>
 		{
 			push("success", "Event recorded.");
+			// Show it in the session "recently added" log under the form.
+			add_recent_event(saved);
 			void query_client.invalidateQueries({ queryKey: ["events"] });
 			void query_client.invalidateQueries({ queryKey: ["dashboard"] });
-			// Return to a fresh blank form for the next entry.
+			// The category just used becomes the new "last used" for this kind.
+			void query_client.invalidateQueries({ queryKey: ["last_used_subcategories"] });
+			// Return to a fresh blank form for the next entry, keeping the category
+			// just used selected. The "last used" refetch above is async, so select
+			// it directly from the saved event rather than waiting for the query.
 			new_event();
-			set_form(blank_form(form.kind));
+			const next_form = blank_form(saved.kind);
+			next_form.subcategory_id = saved.subcategory_id;
+			set_form(next_form);
 		},
 		onError: (error) => notify_error(error),
 	});
@@ -134,7 +196,7 @@ export function AddEventSection()
 	const is_income = form.kind === "income";
 
 	return (
-		<div className="mx-auto w-full max-w-2xl">
+		<div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
 			<Card>
 				<CardHeader>
 					<CardTitle className="flex items-center justify-between">
@@ -225,9 +287,6 @@ export function AddEventSection()
 								}))
 							}
 						>
-							<option value="" disabled>
-								Select a category…
-							</option>
 							{kind_subcategories.map((item) => (
 								<option key={item.id} value={item.id}>
 									{item.name}
@@ -246,12 +305,21 @@ export function AddEventSection()
 						<Input
 							id="note"
 							type="text"
-							title="An optional note describing this event"
+							title="An optional note describing this event (press Enter to save)"
 							disabled={is_readonly}
 							value={form.note}
 							onChange={(event) =>
 								set_form((current) => ({ ...current, note: event.target.value }))
 							}
+							onKeyDown={(event) =>
+							{
+								// Enter in the note field submits the event, mirroring the Save button.
+								if (event.key === "Enter" && !is_readonly && !create_mutation.isPending)
+								{
+									event.preventDefault();
+									create_mutation.mutate();
+								}
+							}}
 						/>
 					</div>
 
@@ -284,6 +352,44 @@ export function AddEventSection()
 					</div>
 				</CardContent>
 			</Card>
+
+			{/* Session-only feedback: the last few events added this run, newest first,
+			    income and expenses intermingled, fading out with age. */}
+			{recent_events.length > 0 ? (
+				<Card>
+					<CardContent className="pt-4">
+						<Table>
+							<TableHeader>
+								<TableRow>
+									<TableHead>Date</TableHead>
+									<TableHead>Category</TableHead>
+									<TableHead>Note</TableHead>
+									<TableHead className="text-right">Amount</TableHead>
+								</TableRow>
+							</TableHeader>
+							<TableBody>
+								{recent_events.map((event, index) => (
+									<TableRow key={event.id} style={{ opacity: 1 - index * 0.25 }}>
+										<TableCell>{event.event_date}</TableCell>
+										<TableCell className="font-medium">{event.subcategory_name}</TableCell>
+										<TableCell className="max-w-[12rem] truncate text-muted-foreground">
+											{event.note}
+										</TableCell>
+										<TableCell
+											className={cn(
+												"text-right tabular-nums",
+												event.kind === "income" ? "text-income" : "text-expense",
+											)}
+										>
+											{format_money_from_pence(event.amount_pence)}
+										</TableCell>
+									</TableRow>
+								))}
+							</TableBody>
+						</Table>
+					</CardContent>
+				</Card>
+			) : null}
 		</div>
 	);
 }

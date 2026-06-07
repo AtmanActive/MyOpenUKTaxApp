@@ -4,6 +4,8 @@ version = "0.0.5"
 description = "UK HMRC MTD desktop application for the self-employed"
 authors = ["AtmanActive"]
 license = "MIT"
+homepage = "https://github.com/AtmanActive/MyOpenUKTaxApp"
+repository = "https://github.com/AtmanActive/MyOpenUKTaxApp"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

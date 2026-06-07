@@ -13,6 +13,9 @@
 
 @layer base {
 	:root {
+		/* Make native controls (date picker calendar, scrollbars) render light. */
+		color-scheme: light;
+
 		--background: 0 0% 100%;
 		--foreground: 240 10% 3.9%;
 
@@ -51,6 +54,9 @@
 	}
 
 	.dark {
+		/* Switch native controls (date picker calendar, scrollbars) to dark. */
+		color-scheme: dark;
+
 		--background: 240 10% 3.9%;
 		--foreground: 0 0% 98%;
 

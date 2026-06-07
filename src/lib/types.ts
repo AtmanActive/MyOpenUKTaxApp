@@ -105,12 +105,19 @@ export interface EventFilter
 	search_term?: string | null;
 }
 
+// The last-used subcategory id per kind (null when none used yet).
+export interface LastUsedSubcategories
+{
+	income: number | null;
+	expense: number | null;
+}
+
 export interface HmrcSettings
 {
 	environment: string;
 	client_id: string;
 	client_secret: string;
-	redirect_uri: string;
+	oauth_redirect_ports: number[];
 	national_insurance_number: string;
 	business_id: string;
 	access_token: string;
@@ -128,7 +135,33 @@ export interface Settings
 	backup_min_interval_seconds: number;
 	mcp_server_enabled: boolean;
 	mcp_server_port: number;
+	auto_check_for_updates: boolean;
+	auto_update: boolean;
 	hmrc: HmrcSettings;
+}
+
+export interface AppInfo
+{
+	name: string;
+	version: string;
+	authors: string;
+	homepage: string;
+	license: string;
+}
+
+export interface UpdateCheck
+{
+	current_version: string;
+	latest_version: string;
+	update_available: boolean;
+	release_url: string;
+}
+
+export interface HmrcBusiness
+{
+	business_id: string;
+	type_of_business: string;
+	trading_name: string;
 }
 
 export interface HmrcStatus

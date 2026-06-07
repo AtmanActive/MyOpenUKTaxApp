@@ -65,14 +65,26 @@ fn default_mcp_server_port() -> u16
 	8765
 }
 
+fn default_auto_check_for_updates() -> bool
+{
+	true
+}
+
+fn default_auto_update() -> bool
+{
+	false
+}
+
 fn default_hmrc_environment() -> String
 {
 	"sandbox".to_string()
 }
 
-fn default_hmrc_redirect_uri() -> String
+fn default_oauth_redirect_ports() -> Vec<u16>
 {
-	"http://localhost:8350/oauth/callback".to_string()
+	// A small set of loopback ports registered with HMRC; the app uses the first
+	// free one at authorise time, so a collision needs all of them busy at once.
+	vec![8350, 8351, 8352, 8353, 8354]
 }
 
 // HMRC Making-Tax-Digital connection settings. Credentials are supplied by the
@@ -94,8 +106,10 @@ pub struct HmrcSettings
 	#[serde(default)]
 	pub client_secret: String,
 
-	#[serde(default = "default_hmrc_redirect_uri")]
-	pub redirect_uri: String,
+	// Loopback ports the local OAuth redirect listener may use; the first free one
+	// is chosen at authorise time. Register the matching redirect URIs with HMRC.
+	#[serde(default = "default_oauth_redirect_ports")]
+	pub oauth_redirect_ports: Vec<u16>,
 
 	// The taxpayer's National Insurance number and MTD business id, needed to
 	// address the per-business income/expense endpoints.
@@ -127,7 +141,7 @@ impl Default for HmrcSettings
 			environment: default_hmrc_environment(),
 			client_id: String::new(),
 			client_secret: String::new(),
-			redirect_uri: default_hmrc_redirect_uri(),
+			oauth_redirect_ports: default_oauth_redirect_ports(),
 			national_insurance_number: String::new(),
 			business_id: String::new(),
 			access_token: String::new(),
@@ -166,6 +180,12 @@ pub struct Settings
 	#[serde(default = "default_mcp_server_port")]
 	pub mcp_server_port: u16,
 
+	#[serde(default = "default_auto_check_for_updates")]
+	pub auto_check_for_updates: bool,
+
+	#[serde(default = "default_auto_update")]
+	pub auto_update: bool,
+
 	#[serde(default)]
 	pub hmrc: HmrcSettings,
 }
@@ -184,6 +204,8 @@ impl Default for Settings
 			backup_min_interval_seconds: default_backup_min_interval_seconds(),
 			mcp_server_enabled: default_mcp_server_enabled(),
 			mcp_server_port: default_mcp_server_port(),
+			auto_check_for_updates: default_auto_check_for_updates(),
+			auto_update: default_auto_update(),
 			hmrc: HmrcSettings::default(),
 		}
 	}

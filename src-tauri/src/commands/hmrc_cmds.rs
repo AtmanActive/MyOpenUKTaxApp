@@ -8,6 +8,7 @@ use crate::db::models::HmrcCategory;
 use crate::db::models::HmrcSubmission;
 use crate::error::AppError;
 use crate::error::AppResult;
+use crate::hmrc::redirect_uri_for_port;
 use crate::hmrc::HmrcApiResult;
 use crate::hmrc::HmrcClient;
 use crate::hmrc::TokenResponse;
@@ -16,7 +17,17 @@ use crate::state::AppState;
 use crate::util;
 use chrono::Utc;
 use serde::Serialize;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
+use tauri::AppHandle;
 use tauri::State;
+use tauri_plugin_opener::OpenerExt;
 
 // A compact view of the HMRC connection state for the UI.
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +41,76 @@ pub struct HmrcStatus
 	pub has_token: bool,
 	pub environment: String,
 	pub token_expires_at_epoch_seconds: i64,
+}
+
+// One business on the taxpayer's HMRC record.
+#[derive(Debug, Clone, Serialize)]
+pub struct HmrcBusiness
+{
+	pub business_id: String,
+	pub type_of_business: String,
+	pub trading_name: String,
+}
+
+// Fetch the list of businesses from HMRC so the user can pick their Business ID.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<HmrcBusiness>>
+{
+	state.logger.action("HMRC list businesses");
+
+	let (environment, access_token, nino, device_id) = {
+		let settings = state.lock_settings()?;
+		(
+			settings.hmrc.environment.clone(),
+			settings.hmrc.access_token.clone(),
+			settings.hmrc.national_insurance_number.clone(),
+			settings.device_id.clone(),
+		)
+	};
+
+	if access_token.is_empty()
+	{
+		return Err(AppError::HmrcNotConfigured(
+			"authorise the app with HMRC before fetching businesses".to_string(),
+		));
+	}
+	if nino.is_empty()
+	{
+		return Err(AppError::HmrcNotConfigured(
+			"set your National Insurance number in Settings first".to_string(),
+		));
+	}
+
+	let client = HmrcClient::new(&environment, state.logger.clone());
+	let result = client.list_businesses(&access_token, &nino, &device_id).await?;
+
+	if !(200..300).contains(&result.status)
+	{
+		return Err(AppError::Network(format!(
+			"HMRC returned HTTP {} when listing businesses: {}",
+			result.status, result.body
+		)));
+	}
+
+	// The response carries a `listOfBusinesses` array; map each entry, tolerating
+	// missing optional fields like the trading name.
+	let mut businesses = Vec::new();
+	if let Some(list) = result.body.get("listOfBusinesses").and_then(|value| value.as_array())
+	{
+		for item in list
+		{
+			let string_field = |key: &str| -> String {
+				item.get(key).and_then(|value| value.as_str()).unwrap_or("").to_string()
+			};
+			businesses.push(HmrcBusiness {
+				business_id: string_field("businessId"),
+				type_of_business: string_field("typeOfBusiness"),
+				trading_name: string_field("tradingName"),
+			});
+		}
+	}
+
+	Ok(businesses)
 }
 
 // List the locally cached HMRC categories (read-only to the user).
@@ -60,30 +141,220 @@ pub fn hmrc_status(state: State<'_, AppState>) -> AppResult<HmrcStatus>
 	current_status(&state)
 }
 
-// Build the URL the user must open to authorise the app. A random `state` value
-// is generated for CSRF protection; verifying it on the callback is a follow-up
-// once the local redirect listener is implemented.
+// The candidate loopback redirect URIs the user must register with their HMRC
+// application (one per configured fallback port).
 #[tauri::command(rename_all = "snake_case")]
-pub fn hmrc_authorize_url(state: State<'_, AppState>) -> AppResult<String>
+pub fn hmrc_redirect_uris(state: State<'_, AppState>) -> AppResult<Vec<String>>
 {
 	let settings = state.lock_settings()?;
-	if settings.hmrc.client_id.is_empty()
+	Ok(settings
+		.hmrc
+		.oauth_redirect_ports
+		.iter()
+		.map(|port| redirect_uri_for_port(*port))
+		.collect())
+}
+
+// Run the whole authorisation-code flow automatically: bind the first free
+// configured loopback port, open HMRC sign-in in the browser, capture the
+// redirected code (verifying the CSRF state), exchange it for tokens and store
+// them. No copy-paste required.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_authorize(app: AppHandle, state: State<'_, AppState>) -> AppResult<HmrcStatus>
+{
+	state.logger.action("HMRC authorise (automatic)");
+
+	let (environment, client_id, client_secret, ports) = {
+		let settings = state.lock_settings()?;
+		(
+			settings.hmrc.environment.clone(),
+			settings.hmrc.client_id.clone(),
+			settings.hmrc.client_secret.clone(),
+			settings.hmrc.oauth_redirect_ports.clone(),
+		)
+	};
+
+	if client_id.is_empty() || client_secret.is_empty()
 	{
 		return Err(AppError::HmrcNotConfigured(
-			"set the HMRC client id in Settings first".to_string(),
+			"set the HMRC client id and secret in Settings first".to_string(),
 		));
 	}
 
-	let client = HmrcClient::new(&settings.hmrc.environment, state.logger.clone());
+	// Bind the first free configured port so the redirect URI matches a
+	// registered one, then derive that exact URI.
+	let (servers, port) = bind_loopback_servers(&ports)?;
+	let redirect_uri = redirect_uri_for_port(port);
 	let csrf_state = util::random_hex_token(24);
-	let url = client.authorize_url(
-		&settings.hmrc.client_id,
-		&settings.hmrc.redirect_uri,
-		&csrf_state,
-	);
 
-	state.logger.action("requested HMRC authorize URL");
-	Ok(url)
+	// Open the HMRC sign-in page in the default browser.
+	let client = HmrcClient::new(&environment, state.logger.clone());
+	let authorize_url = client.authorize_url(&client_id, &redirect_uri, &csrf_state);
+	app.opener()
+		.open_url(authorize_url, None::<&str>)
+		.map_err(|error| AppError::Io(error.to_string()))?;
+
+	// Wait on a blocking thread for the browser to be redirected back with a code.
+	let expected_state = csrf_state.clone();
+	let code = tauri::async_runtime::spawn_blocking(move || {
+		wait_for_oauth_code(servers, &expected_state, Duration::from_secs(180))
+	})
+	.await
+	.map_err(|error| AppError::Internal(format!("authorisation listener failed: {error}")))??;
+
+	// Exchange the code (using the same redirect URI) and persist the tokens.
+	let token = client
+		.exchange_code(&client_id, &client_secret, &redirect_uri, &code)
+		.await?;
+	store_tokens(&state, token)?;
+	current_status(&state)
+}
+
+// Bind loopback listeners for the first free configured port. Both the IPv4
+// (127.0.0.1) and IPv6 (::1) loopback are bound where possible, because some
+// browsers resolve "localhost" to ::1 and will not fall back to IPv4.
+fn bind_loopback_servers(ports: &[u16]) -> AppResult<(Vec<tiny_http::Server>, u16)>
+{
+	for &port in ports
+	{
+		let mut servers = Vec::new();
+		if let Ok(server) = tiny_http::Server::http(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+		{
+			servers.push(server);
+		}
+		if let Ok(server) = tiny_http::Server::http(SocketAddr::from((Ipv6Addr::LOCALHOST, port)))
+		{
+			servers.push(server);
+		}
+		if !servers.is_empty()
+		{
+			return Ok((servers, port));
+		}
+	}
+
+	Err(AppError::Internal(
+		"no free OAuth redirect port available; close other apps using them or add more ports"
+			.to_string(),
+	))
+}
+
+// Build the small HTML page shown in the browser once the redirect is received.
+fn oauth_done_response() -> tiny_http::Response<std::io::Cursor<Vec<u8>>>
+{
+	let body = "<html><body style=\"font-family:sans-serif;padding:2rem\">\
+		<h2>MyOpenUKTaxApp</h2><p>Authorisation received. You can close this tab \
+		and return to the app.</p></body></html>";
+	let mut response = tiny_http::Response::from_string(body);
+	if let Ok(header) = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html"[..])
+	{
+		response.add_header(header);
+	}
+	response
+}
+
+// Block until the OAuth redirect arrives on any bound loopback listener (or the
+// timeout elapses), returning the code once the CSRF state has been verified.
+// One thread listens per bound address (IPv4/IPv6); the first to see a valid
+// callback wins.
+fn wait_for_oauth_code(
+	servers: Vec<tiny_http::Server>,
+	expected_state: &str,
+	timeout: Duration,
+) -> AppResult<String>
+{
+	let (sender, receiver) = mpsc::channel::<AppResult<String>>();
+	let stop = Arc::new(AtomicBool::new(false));
+	let expected_state = expected_state.to_string();
+
+	let mut handles = Vec::new();
+	for server in servers
+	{
+		let sender = sender.clone();
+		let stop = stop.clone();
+		let expected_state = expected_state.clone();
+		handles.push(std::thread::spawn(move || {
+			while !stop.load(Ordering::Relaxed)
+			{
+				match server.recv_timeout(Duration::from_millis(250))
+				{
+					Ok(Some(request)) =>
+					{
+						let (code, returned_state) = parse_callback_query(request.url());
+						let _ = request.respond(oauth_done_response());
+
+						// Ignore unrelated requests (e.g. favicon) that carry no code.
+						if let Some(code) = code
+						{
+							let result = if returned_state.as_deref() == Some(expected_state.as_str())
+							{
+								Ok(code)
+							}
+							else
+							{
+								Err(AppError::Validation(
+									"OAuth state mismatch — authorisation rejected".to_string(),
+								))
+							};
+							let _ = sender.send(result);
+							stop.store(true, Ordering::Relaxed);
+							return;
+						}
+					}
+					// Timed out, or a transient error: loop and re-check the stop flag.
+					Ok(None) => {}
+					Err(_) => {}
+				}
+			}
+		}));
+	}
+
+	// Drop our spare sender so the channel can close if every thread exits.
+	drop(sender);
+
+	let outcome = match receiver.recv_timeout(timeout)
+	{
+		Ok(result) => result,
+		Err(_) => Err(AppError::Network("HMRC authorisation timed out".to_string())),
+	};
+
+	// Tell the listener threads to wind down and wait for them.
+	stop.store(true, Ordering::Relaxed);
+	for handle in handles
+	{
+		let _ = handle.join();
+	}
+
+	outcome
+}
+
+// Extract `code` and `state` from a callback URL like `/oauth/callback?code=…&state=…`.
+fn parse_callback_query(url: &str) -> (Option<String>, Option<String>)
+{
+	let query = match url.split_once('?')
+	{
+		Some((_, query)) => query,
+		None => return (None, None),
+	};
+
+	let mut code = None;
+	let mut state = None;
+	for pair in query.split('&')
+	{
+		if let Some((key, value)) = pair.split_once('=')
+		{
+			let decoded = urlencoding::decode(value)
+				.map(|value| value.into_owned())
+				.unwrap_or_else(|_| value.to_string());
+			match key
+			{
+				"code" => code = Some(decoded),
+				"state" => state = Some(decoded),
+				_ => {}
+			}
+		}
+	}
+
+	(code, state)
 }
 
 // Unauthenticated sandbox/production connectivity check.
@@ -100,41 +371,6 @@ pub async fn hmrc_hello_world(state: State<'_, AppState>) -> AppResult<HmrcApiRe
 
 	let client = HmrcClient::new(&environment, state.logger.clone());
 	client.hello_world(&device_id).await
-}
-
-// Exchange an authorisation code (pasted/redirected back from HMRC) for tokens.
-#[tauri::command(rename_all = "snake_case")]
-pub async fn hmrc_exchange_code(
-	state: State<'_, AppState>,
-	code: String,
-) -> AppResult<HmrcStatus>
-{
-	state.logger.action("HMRC exchange authorization code");
-
-	let (environment, client_id, client_secret, redirect_uri) = {
-		let settings = state.lock_settings()?;
-		(
-			settings.hmrc.environment.clone(),
-			settings.hmrc.client_id.clone(),
-			settings.hmrc.client_secret.clone(),
-			settings.hmrc.redirect_uri.clone(),
-		)
-	};
-
-	if client_id.is_empty() || client_secret.is_empty()
-	{
-		return Err(AppError::HmrcNotConfigured(
-			"set the HMRC client id and secret in Settings first".to_string(),
-		));
-	}
-
-	let client = HmrcClient::new(&environment, state.logger.clone());
-	let token = client
-		.exchange_code(&client_id, &client_secret, &redirect_uri, &code)
-		.await?;
-
-	store_tokens(&state, token)?;
-	current_status(&state)
 }
 
 // Refresh the access token using the stored refresh token.

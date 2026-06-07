@@ -6,7 +6,16 @@ use crate::db::models::NewLedgerEvent;
 use crate::error::AppResult;
 use crate::log_debug;
 use crate::state::AppState;
+use serde::Serialize;
 use tauri::State;
+
+// The last-used subcategory per kind, for pre-selecting the Add Event dropdown.
+#[derive(Debug, Clone, Serialize)]
+pub struct LastUsedSubcategories
+{
+	pub income: Option<i64>,
+	pub expense: Option<i64>,
+}
 
 // List events of one kind ("income" | "expense") with an optional date/text filter.
 #[tauri::command(rename_all = "snake_case")]
@@ -53,4 +62,16 @@ pub fn delete_event(state: State<'_, AppState>, id: i64) -> AppResult<()>
 	state.logger.action(&format!("delete event {id}"));
 	let mut database = state.lock_database()?;
 	database.delete_event(id)
+}
+
+// Report the last-used subcategory for each kind so the Add Event form can
+// pre-select it.
+#[tauri::command(rename_all = "snake_case")]
+pub fn last_used_subcategories(state: State<'_, AppState>) -> AppResult<LastUsedSubcategories>
+{
+	let database = state.lock_database()?;
+	Ok(LastUsedSubcategories {
+		income: database.last_used_subcategory_id("income")?,
+		expense: database.last_used_subcategory_id("expense")?,
+	})
 }
