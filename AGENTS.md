@@ -12,3 +12,4 @@ When tasked with coding, writing, editing, or summarizing, ask the user up to th
 @docs/design/coding-standards.md
 @docs/design/overview.md
 @docs/design/architecture.md
+@docs/design/github_setup.md
