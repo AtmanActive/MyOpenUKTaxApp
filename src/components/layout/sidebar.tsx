@@ -66,7 +66,16 @@ export function Sidebar({ orientation }: SidebarProps)
 									: "text-foreground hover:bg-accent hover:text-accent-foreground",
 							)}
 						>
-							<Icon name={section.icon} className="text-xl" />
+							{section.id === "dashboard" ? (
+									<img
+										src="/logo_shadow.png"
+										alt=""
+										aria-hidden="true"
+										className="h-6 w-6 shrink-0 object-contain"
+									/>
+								) : (
+									<Icon name={section.icon} className="text-xl" />
+								)}
 							<span className={cn(!is_vertical && "text-[0.65rem]")}>{section.label}</span>
 						</button>
 					);
