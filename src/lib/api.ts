@@ -80,6 +80,8 @@ export const api = {
 	list_hmrc_submissions: () =>
 		invoke<HmrcSubmission[]>("list_hmrc_submissions"),
 	hmrc_list_businesses: () => invoke<HmrcBusiness[]>("hmrc_list_businesses"),
+	hmrc_set_business_id: (business_id: string) =>
+		invoke<void>("hmrc_set_business_id", { business_id }),
 	hmrc_status: () => invoke<HmrcStatus>("hmrc_status"),
 	hmrc_redirect_uris: () => invoke<string[]>("hmrc_redirect_uris"),
 	// Runs the full loopback authorise flow; resolves once tokens are stored.

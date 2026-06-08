@@ -37,6 +37,18 @@ type SaveStatus = "idle" | "saving" | "saved";
 // How long to wait after the last keystroke before persisting a text/number field.
 const DEBOUNCE_MS = 500;
 
+// Normalise a NINO as typed: upper-case, drop spaces, cap at 9 characters.
+function normalize_nino(value: string): string
+{
+	return value.toUpperCase().replace(/\s+/g, "").slice(0, 9);
+}
+
+// Light shape check mirroring the backend (e.g. AB123456C).
+function is_valid_nino(value: string): boolean
+{
+	return /^[A-Z]{2}[0-9]{6}[A-D]$/.test(value);
+}
+
 export function SettingsSection()
 {
 	const query_client = useQueryClient();
@@ -386,9 +398,44 @@ export function SettingsSection()
 						</div>
 						<TextField id="client_id" label="Client ID" value={draft.hmrc.client_id} on_change={(value) => update_hmrc({ client_id: value }, false)} hint="From your HMRC Developer Hub application" />
 						<TextField id="client_secret" label="Client secret" type="password" value={draft.hmrc.client_secret} on_change={(value) => update_hmrc({ client_secret: value }, false)} hint="Stored locally in the settings file" />
-						<TextField id="national_insurance_number" label="National Insurance no." value={draft.hmrc.national_insurance_number} on_change={(value) => update_hmrc({ national_insurance_number: value }, false)} hint="Your NINO (e.g. AA123456A)" />
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="national_insurance_number">National Insurance no.</Label>
+							<Input
+								id="national_insurance_number"
+								title="Your National Insurance number (e.g. AB123456C)"
+								placeholder="AB123456C"
+								value={draft.hmrc.national_insurance_number}
+								onChange={(event) =>
+									update_hmrc({ national_insurance_number: normalize_nino(event.target.value) }, false)
+								}
+							/>
+							{draft.hmrc.national_insurance_number.length > 0 &&
+							!is_valid_nino(draft.hmrc.national_insurance_number) ? (
+								<span className="text-xs text-destructive">
+									Doesn’t look like a NINO yet (expected like AB123456C).
+								</span>
+							) : null}
+						</div>
 						<TextField id="business_id" label="Business ID" value={draft.hmrc.business_id} on_change={(value) => update_hmrc({ business_id: value }, false)} hint="HMRC business ID (e.g. XAIS…), not your UTR. Use Fetch below to look it up." />
 					</div>
+
+					{/* Sandbox only: select a stubbed HMRC response. */}
+					{draft.hmrc.environment === "sandbox" ? (
+						<div className="flex flex-col gap-1.5">
+							<Label htmlFor="gov_test_scenario">Sandbox test scenario (optional)</Label>
+							<Input
+								id="gov_test_scenario"
+								title="Sent as the Gov-Test-Scenario header to select a stubbed HMRC sandbox response"
+								placeholder="e.g. a scenario name from HMRC's API docs"
+								value={draft.hmrc.gov_test_scenario}
+								onChange={(event) => update_hmrc({ gov_test_scenario: event.target.value }, false)}
+							/>
+							<span className="text-xs text-muted-foreground">
+								Only used in the sandbox — sent as the Gov-Test-Scenario header so HMRC
+								returns canned data (see the HMRC API docs for scenario names).
+							</span>
+						</div>
+					) : null}
 
 					{/* The loopback redirect URIs to register on the HMRC Developer Hub. */}
 					<div className="rounded-md border border-border bg-muted/40 p-3">

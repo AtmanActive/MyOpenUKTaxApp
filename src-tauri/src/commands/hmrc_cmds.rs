@@ -26,6 +26,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::AppHandle;
+use tauri::Manager;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
@@ -53,12 +54,14 @@ pub struct HmrcBusiness
 }
 
 // Fetch the list of businesses from HMRC so the user can pick their Business ID.
+// This read-only call also doubles as the NINO-to-account authorisation check:
+// a 403 here means the signed-in account is not authorised for the entered NINO.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<HmrcBusiness>>
 {
 	state.logger.action("HMRC list businesses");
 
-	let (environment, access_token, nino, device_id) = {
+	let (environment, access_token, raw_nino, device_id) = {
 		let settings = state.lock_settings()?;
 		(
 			settings.hmrc.environment.clone(),
@@ -71,25 +74,52 @@ pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<H
 	if access_token.is_empty()
 	{
 		return Err(AppError::HmrcNotConfigured(
-			"authorise the app with HMRC before fetching businesses".to_string(),
+			"Authorise the app with HMRC before fetching businesses.".to_string(),
 		));
 	}
-	if nino.is_empty()
+	if raw_nino.trim().is_empty()
 	{
 		return Err(AppError::HmrcNotConfigured(
-			"set your National Insurance number in Settings first".to_string(),
+			"Enter your National Insurance number in Settings first.".to_string(),
 		));
 	}
 
-	let client = HmrcClient::new(&environment, state.logger.clone());
+	// Normalise and sanity-check the NINO so obvious typos fail instantly,
+	// without a network round-trip.
+	let nino = normalize_nino(&raw_nino);
+	validate_nino(&nino)?;
+
+	let client = HmrcClient::new(
+		&environment,
+		state.logger.clone(),
+		&state.lock_settings()?.hmrc.gov_test_scenario,
+	);
 	let result = client.list_businesses(&access_token, &nino, &device_id).await?;
 
-	if !(200..300).contains(&result.status)
+	// Translate the HTTP status into a clear, actionable message.
+	match result.status
 	{
-		return Err(AppError::Network(format!(
-			"HMRC returned HTTP {} when listing businesses: {}",
-			result.status, result.body
-		)));
+		200..=299 => {}
+		400 => return Err(AppError::Validation(format!(
+			"HMRC rejected National Insurance number {nino}. Double-check that it is correct."
+		))),
+		401 => return Err(AppError::HmrcNotConfigured(
+			"Your HMRC sign-in has expired. Please authorise again.".to_string(),
+		)),
+		403 => return Err(AppError::Validation(format!(
+			"The HMRC account you signed in with is not authorised for National Insurance number \
+			 {nino}. Sign in as the right person, or use an account with agent authorisation for \
+			 that NINO."
+		))),
+		404 => return Err(AppError::NotFound(
+			"HMRC returned no business details for this account/NINO. In the sandbox, set a \
+			 Gov-Test-Scenario in Settings (or use a test user that has a business set up)."
+				.to_string(),
+		)),
+		status => return Err(AppError::Network(format!(
+			"HMRC returned HTTP {status} when listing businesses: {}",
+			result.body
+		))),
 	}
 
 	// The response carries a `listOfBusinesses` array; map each entry, tolerating
@@ -111,6 +141,50 @@ pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<H
 	}
 
 	Ok(businesses)
+}
+
+// Persist the chosen Business ID (used by the post-authorise auto-prefill when a
+// single business is found).
+#[tauri::command(rename_all = "snake_case")]
+pub fn hmrc_set_business_id(state: State<'_, AppState>, business_id: String) -> AppResult<()>
+{
+	state.logger.action("HMRC set business id");
+	let mut settings = state.lock_settings()?;
+	settings.hmrc.business_id = business_id;
+	settings.save(&state.paths)?;
+	Ok(())
+}
+
+// Normalise a NINO: drop any whitespace and upper-case it.
+fn normalize_nino(raw: &str) -> String
+{
+	raw.chars()
+		.filter(|character| !character.is_whitespace())
+		.collect::<String>()
+		.to_uppercase()
+}
+
+// Light shape check: two letters, six digits, then a suffix letter A–D (e.g.
+// AB123456C). Deliberately not the full HMRC rule set — just enough to catch
+// typos before a network call.
+fn validate_nino(nino: &str) -> AppResult<()>
+{
+	let bytes = nino.as_bytes();
+	let well_formed = nino.len() == 9
+		&& bytes[0..2].iter().all(u8::is_ascii_uppercase)
+		&& bytes[2..8].iter().all(u8::is_ascii_digit)
+		&& matches!(bytes[8], b'A'..=b'D');
+
+	if well_formed
+	{
+		Ok(())
+	}
+	else
+	{
+		Err(AppError::Validation(format!(
+			"'{nino}' does not look like a National Insurance number (expected like AB123456C)."
+		)))
+	}
 }
 
 // List the locally cached HMRC categories (read-only to the user).
@@ -188,7 +262,11 @@ pub async fn hmrc_authorize(app: AppHandle, state: State<'_, AppState>) -> AppRe
 	let csrf_state = util::random_hex_token(24);
 
 	// Open the HMRC sign-in page in the default browser.
-	let client = HmrcClient::new(&environment, state.logger.clone());
+	let client = HmrcClient::new(
+		&environment,
+		state.logger.clone(),
+		&state.lock_settings()?.hmrc.gov_test_scenario,
+	);
 	let authorize_url = client.authorize_url(&client_id, &redirect_uri, &csrf_state);
 	app.opener()
 		.open_url(authorize_url, None::<&str>)
@@ -202,12 +280,27 @@ pub async fn hmrc_authorize(app: AppHandle, state: State<'_, AppState>) -> AppRe
 	.await
 	.map_err(|error| AppError::Internal(format!("authorisation listener failed: {error}")))??;
 
+	// The redirect has landed; bring our window to the front so the user sees the
+	// result without having to dismiss the browser themselves.
+	bring_window_to_front(&app);
+
 	// Exchange the code (using the same redirect URI) and persist the tokens.
 	let token = client
 		.exchange_code(&client_id, &client_secret, &redirect_uri, &code)
 		.await?;
 	store_tokens(&state, token)?;
 	current_status(&state)
+}
+
+// Raise and focus the main window (unminimising/showing it first if needed).
+fn bring_window_to_front(app: &AppHandle)
+{
+	if let Some(window) = app.get_webview_window("main")
+	{
+		let _ = window.unminimize();
+		let _ = window.show();
+		let _ = window.set_focus();
+	}
 }
 
 // Bind loopback listeners for the first free configured port. Both the IPv4
@@ -369,7 +462,11 @@ pub async fn hmrc_hello_world(state: State<'_, AppState>) -> AppResult<HmrcApiRe
 		(settings.hmrc.environment.clone(), settings.device_id.clone())
 	};
 
-	let client = HmrcClient::new(&environment, state.logger.clone());
+	let client = HmrcClient::new(
+		&environment,
+		state.logger.clone(),
+		&state.lock_settings()?.hmrc.gov_test_scenario,
+	);
 	client.hello_world(&device_id).await
 }
 
@@ -396,7 +493,11 @@ pub async fn hmrc_refresh_token(state: State<'_, AppState>) -> AppResult<HmrcSta
 		));
 	}
 
-	let client = HmrcClient::new(&environment, state.logger.clone());
+	let client = HmrcClient::new(
+		&environment,
+		state.logger.clone(),
+		&state.lock_settings()?.hmrc.gov_test_scenario,
+	);
 	let token = client
 		.refresh_access_token(&client_id, &client_secret, &refresh_token)
 		.await?;
@@ -456,7 +557,11 @@ pub async fn hmrc_submit_period(
 	let request_json = serde_json::to_string_pretty(&period_body).unwrap_or_default();
 
 	// Perform the network call with no locks held.
-	let client = HmrcClient::new(&environment, state.logger.clone());
+	let client = HmrcClient::new(
+		&environment,
+		state.logger.clone(),
+		&state.lock_settings()?.hmrc.gov_test_scenario,
+	);
 	let api_result = client
 		.submit_self_employment_period(
 			&access_token,

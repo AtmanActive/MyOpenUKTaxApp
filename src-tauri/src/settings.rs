@@ -129,6 +129,11 @@ pub struct HmrcSettings
 
 	#[serde(default)]
 	pub token_expires_at_epoch_seconds: i64,
+
+	// Sandbox-only: value sent as the `Gov-Test-Scenario` header to select a
+	// stubbed HMRC response. Ignored in production.
+	#[serde(default)]
+	pub gov_test_scenario: String,
 }
 
 // Sensible first-run defaults: sandbox environment and the default redirect URI,
@@ -147,6 +152,7 @@ impl Default for HmrcSettings
 			access_token: String::new(),
 			refresh_token: String::new(),
 			token_expires_at_epoch_seconds: 0,
+			gov_test_scenario: String::new(),
 		}
 	}
 }

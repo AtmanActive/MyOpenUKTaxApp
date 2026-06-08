@@ -83,6 +83,7 @@ pub fn run()
 			commands::hmrc_cmds::list_hmrc_categories,
 			commands::hmrc_cmds::list_hmrc_submissions,
 			commands::hmrc_cmds::hmrc_list_businesses,
+			commands::hmrc_cmds::hmrc_set_business_id,
 			commands::hmrc_cmds::hmrc_status,
 			commands::hmrc_cmds::hmrc_redirect_uris,
 			commands::hmrc_cmds::hmrc_authorize,

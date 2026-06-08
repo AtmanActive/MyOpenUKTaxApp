@@ -50,12 +50,46 @@ export function HmrcHistorySection()
 		onError: (error) => notify_error(error),
 	});
 
+	// After authorising, validate that the signed-in account matches the entered
+	// NINO and pre-fill the Business ID. The read-only List Businesses call is the
+	// validator: 200 ⇒ authorised; the backend turns 401/403/400 into clear text.
+	const connect_check_mutation = useMutation({
+		mutationFn: () => api.hmrc_list_businesses(),
+		onSuccess: async (list) =>
+		{
+			if (list.length === 0)
+			{
+				push("info", "Authorised, but HMRC shows no businesses for this account/NINO.");
+				return;
+			}
+			if (list.length === 1)
+			{
+				try
+				{
+					await api.hmrc_set_business_id(list[0].business_id);
+					void query_client.invalidateQueries({ queryKey: ["hmrc_status"] });
+					void query_client.invalidateQueries({ queryKey: ["settings"] });
+					push("success", `Connected — using your business (${list[0].business_id}).`);
+				}
+				catch (error)
+				{
+					notify_error(error);
+				}
+				return;
+			}
+			push("info", `Connected — found ${list.length} businesses. Pick one on the Settings screen.`);
+		},
+		onError: (error) => notify_error(error),
+	});
+
 	const authorize_mutation = useMutation({
 		mutationFn: () => api.hmrc_authorize(),
 		onSuccess: () =>
 		{
 			push("success", "Authorised — access token stored.");
 			refresh_status();
+			// Validate the NINO ↔ account pairing and pre-fill the Business ID.
+			connect_check_mutation.mutate();
 		},
 		onError: (error) => notify_error(error),
 	});
@@ -123,10 +157,18 @@ export function HmrcHistorySection()
 								<Button
 									title="Sign in to HMRC in your browser; the app captures the result automatically"
 									onClick={() => authorize_mutation.mutate()}
-									disabled={!status.configured || authorize_mutation.isPending}
+									disabled={
+										!status.configured ||
+										authorize_mutation.isPending ||
+										connect_check_mutation.isPending
+									}
 								>
 									<Icon name="login" />
-									{authorize_mutation.isPending ? "Waiting for sign-in…" : "Authorise with HMRC"}
+									{authorize_mutation.isPending
+										? "Waiting for sign-in…"
+										: connect_check_mutation.isPending
+											? "Checking access…"
+											: "Authorise with HMRC"}
 								</Button>
 								<Button variant="outline" title="Refresh the access token" onClick={() => refresh_token_mutation.mutate()} disabled={!status.has_token || refresh_token_mutation.isPending}>
 									<Icon name="autorenew" /> Refresh token

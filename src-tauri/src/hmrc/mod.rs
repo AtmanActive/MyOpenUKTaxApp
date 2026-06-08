@@ -23,6 +23,13 @@ const PRODUCTION_BASE_URL: &str = "https://api.service.hmrc.gov.uk";
 // OAuth scopes required for MTD Income Tax Self Assessment.
 const OAUTH_SCOPE: &str = "read:self-assessment write:self-assessment";
 
+// HMRC API versions, expressed as Accept header values. These must match the
+// versions the application is subscribed to on the HMRC Developer Hub. Keep them
+// in sync with docs/design/MTD_APIs_required.md.
+const HELLO_WORLD_ACCEPT: &str = "application/vnd.hmrc.1.0+json";
+const BUSINESS_DETAILS_ACCEPT: &str = "application/vnd.hmrc.2.0+json";
+const SELF_EMPLOYMENT_BUSINESS_ACCEPT: &str = "application/vnd.hmrc.5.0+json";
+
 // Fixed path the local OAuth redirect listener serves.
 pub const OAUTH_REDIRECT_PATH: &str = "/oauth/callback";
 
@@ -67,24 +74,28 @@ pub struct HmrcClient
 	http_client: reqwest::Client,
 	base_url: String,
 	logger: Arc<Logger>,
+	// True for the sandbox; gates the Gov-Test-Scenario header.
+	is_sandbox: bool,
+	// Sandbox-only scenario selector sent as the Gov-Test-Scenario header.
+	gov_test_scenario: String,
 }
 
 impl HmrcClient
 {
 	// Construct a client for the given environment ("sandbox" | "production").
-	pub fn new(environment: &str, logger: Arc<Logger>) -> Self
+	// In the sandbox, a non-empty `gov_test_scenario` is sent on API calls to
+	// select a stubbed HMRC response.
+	pub fn new(environment: &str, logger: Arc<Logger>, gov_test_scenario: &str) -> Self
 	{
-		let base_url = match environment
-		{
-			"production" => PRODUCTION_BASE_URL,
-			_ => SANDBOX_BASE_URL,
-		}
-		.to_string();
+		let is_sandbox = environment != "production";
+		let base_url = if is_sandbox { SANDBOX_BASE_URL } else { PRODUCTION_BASE_URL }.to_string();
 
 		Self {
 			http_client: reqwest::Client::new(),
 			base_url,
 			logger,
+			is_sandbox,
+			gov_test_scenario: gov_test_scenario.to_string(),
 		}
 	}
 
@@ -177,7 +188,7 @@ impl HmrcClient
 		self.send(
 			reqwest::Method::GET,
 			"/hello/world",
-			"application/vnd.hmrc.1.0+json",
+			HELLO_WORLD_ACCEPT,
 			None,
 			None,
 			device_id,
@@ -198,7 +209,7 @@ impl HmrcClient
 		self.send(
 			reqwest::Method::GET,
 			&path,
-			"application/vnd.hmrc.1.0+json",
+			BUSINESS_DETAILS_ACCEPT,
 			Some(access_token),
 			None,
 			device_id,
@@ -223,7 +234,7 @@ impl HmrcClient
 		self.send(
 			reqwest::Method::POST,
 			&path,
-			"application/vnd.hmrc.2.0+json",
+			SELF_EMPLOYMENT_BUSINESS_ACCEPT,
 			Some(access_token),
 			Some(period_body),
 			device_id,
@@ -264,6 +275,14 @@ impl HmrcClient
 			builder = builder.header(name, value);
 		}
 
+		// Sandbox only: select a stubbed HMRC response via Gov-Test-Scenario.
+		if self.is_sandbox && !self.gov_test_scenario.is_empty()
+		{
+			builder = builder.header("Gov-Test-Scenario", self.gov_test_scenario.as_str());
+			self.logger
+				.network(&format!("Gov-Test-Scenario: {}", self.gov_test_scenario));
+		}
+
 		// Attach a JSON body when present.
 		if let Some(body) = json_body
 		{
@@ -274,6 +293,14 @@ impl HmrcClient
 		let status = response.status().as_u16();
 		let body_text = response.text().await?;
 		self.logger.network(&format!("{method} {url} -> {status}"));
+
+		// On any non-2xx, log a snippet of HMRC's response body so the exact error
+		// code/message is visible for diagnosis (error bodies carry no secrets).
+		if !(200..300).contains(&status)
+		{
+			let snippet: String = body_text.chars().take(600).collect();
+			self.logger.network(&format!("{method} {url} body: {snippet}"));
+		}
 
 		// Parse the body as JSON, falling back to a string wrapper so the caller
 		// always receives structured data even on a plain-text error page.

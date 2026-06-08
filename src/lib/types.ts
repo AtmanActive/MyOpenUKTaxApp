@@ -123,6 +123,7 @@ export interface HmrcSettings
 	access_token: string;
 	refresh_token: string;
 	token_expires_at_epoch_seconds: number;
+	gov_test_scenario: string;
 }
 
 export interface Settings
