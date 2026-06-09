@@ -80,6 +80,20 @@ fn default_hmrc_environment() -> String
 	"sandbox".to_string()
 }
 
+// Sandbox users almost always start against HMRC's mock test data, so default the
+// escape hatch on; turning it off targets a real sandbox identity.
+fn default_using_mock_identity() -> bool
+{
+	true
+}
+
+// A sensible first scenario for the sandbox business lookup: HMRC's stubbed
+// self-employment + property test data. Users can change or clear it.
+fn default_gov_test_scenario() -> String
+{
+	"BUSINESS_AND_PROPERTY".to_string()
+}
+
 fn default_oauth_redirect_ports() -> Vec<u16>
 {
 	// A small set of loopback ports registered with HMRC; the app uses the first
@@ -130,9 +144,15 @@ pub struct HmrcSettings
 	#[serde(default)]
 	pub token_expires_at_epoch_seconds: i64,
 
+	// Sandbox-only: when true, API calls that support it (the business lookup) send
+	// the `Gov-Test-Scenario` header to address HMRC's stubbed/mock test data. Turn
+	// it off to test against a real identity in the sandbox. Ignored in production.
+	#[serde(default = "default_using_mock_identity")]
+	pub using_mock_identity: bool,
+
 	// Sandbox-only: value sent as the `Gov-Test-Scenario` header to select a
-	// stubbed HMRC response. Ignored in production.
-	#[serde(default)]
+	// stubbed HMRC response (only when `using_mock_identity`). Ignored in production.
+	#[serde(default = "default_gov_test_scenario")]
 	pub gov_test_scenario: String,
 }
 
@@ -152,7 +172,8 @@ impl Default for HmrcSettings
 			access_token: String::new(),
 			refresh_token: String::new(),
 			token_expires_at_epoch_seconds: 0,
-			gov_test_scenario: String::new(),
+			using_mock_identity: default_using_mock_identity(),
+			gov_test_scenario: default_gov_test_scenario(),
 		}
 	}
 }

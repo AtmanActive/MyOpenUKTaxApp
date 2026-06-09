@@ -32,8 +32,7 @@ export function HmrcHistorySection()
 	const set_active_section = use_app_store((state) => state.set_active_section);
 	const query_client = useQueryClient();
 
-	const [period_from, set_period_from] = useState("");
-	const [period_to, set_period_to] = useState("");
+	const [period_end, set_period_end] = useState("");
 	const [expanded_id, set_expanded_id] = useState<number | null>(null);
 
 	const status_query = useQuery({ queryKey: ["hmrc_status"], queryFn: () => api.hmrc_status() });
@@ -107,11 +106,11 @@ export function HmrcHistorySection()
 	const submit_mutation = useMutation({
 		mutationFn: () =>
 		{
-			if (!period_from || !period_to)
+			if (!period_end)
 			{
-				return Promise.reject("Choose both period start and end dates.");
+				return Promise.reject("Choose the date you are reporting up to.");
 			}
-			return api.hmrc_submit_period(period_from, period_to);
+			return api.hmrc_submit_period(period_end);
 		},
 		onSuccess: (submission) =>
 		{
@@ -189,24 +188,32 @@ export function HmrcHistorySection()
 
 			<Card>
 				<CardHeader>
-					<CardTitle>Submit a quarterly period</CardTitle>
+					<CardTitle>Submit cumulative period (year-to-date)</CardTitle>
 				</CardHeader>
 				<CardContent>
 					<div className="flex flex-col gap-3 sm:flex-row sm:items-end">
 						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="period_from">Period start</Label>
-							<Input id="period_from" type="date" title="Quarter start date" value={period_from} onChange={(event) => set_period_from(event.target.value)} />
+							<Label htmlFor="period_end">Reporting up to</Label>
+							<Input
+								id="period_end"
+								type="date"
+								title="The date you are reporting up to (year-to-date). The tax year and its 6 April start are derived from this."
+								value={period_end}
+								onChange={(event) => set_period_end(event.target.value)}
+							/>
 						</div>
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="period_to">Period end</Label>
-							<Input id="period_to" type="date" title="Quarter end date" value={period_to} onChange={(event) => set_period_to(event.target.value)} />
-						</div>
-						<Button title="Build and submit this period to HMRC" onClick={() => submit_mutation.mutate()} disabled={submit_mutation.isPending}>
-							<Icon name="cloud_upload" /> Submit period
+						<Button title="Build and submit the cumulative figures to HMRC" onClick={() => submit_mutation.mutate()} disabled={submit_mutation.isPending}>
+							<Icon name="cloud_upload" /> Submit
 						</Button>
 					</div>
 					<p className="mt-2 text-xs text-muted-foreground">
-						Amounts are aggregated from your mapped categories over the chosen window. Unmapped events are excluded.
+						{uk_tax_year_label(period_end) ? (
+							<>
+								Tax year <span className="font-medium text-foreground">{uk_tax_year_label(period_end)}</span> — cumulative from{" "}
+								{tax_year_start(period_end)} to {period_end}.{" "}
+							</>
+						) : null}
+						From 2025-26 onwards HMRC uses cumulative submissions: amounts are aggregated year-to-date from your mapped categories. Unmapped events are excluded.
 					</p>
 				</CardContent>
 			</Card>
@@ -273,6 +280,43 @@ export function HmrcHistorySection()
 			</Card>
 		</div>
 	);
+}
+
+// The UK tax year starts on 6 April. Returns the start year for a YYYY-MM-DD date,
+// or null when the date is empty/invalid.
+function tax_year_start_year(end_date: string): number | null
+{
+	if (!end_date)
+	{
+		return null;
+	}
+	const date = new Date(`${end_date}T00:00:00`);
+	if (Number.isNaN(date.getTime()))
+	{
+		return null;
+	}
+	const year = date.getFullYear();
+	const month = date.getMonth() + 1;
+	const day = date.getDate();
+	return month > 4 || (month === 4 && day >= 6) ? year : year - 1;
+}
+
+// The HMRC tax-year label ("YYYY-YY") for a reporting-end date, or null.
+function uk_tax_year_label(end_date: string): string | null
+{
+	const start = tax_year_start_year(end_date);
+	if (start === null)
+	{
+		return null;
+	}
+	return `${start}-${String((start + 1) % 100).padStart(2, "0")}`;
+}
+
+// The 6 April start date ("YYYY-04-06") of the tax year for a reporting-end date.
+function tax_year_start(end_date: string): string
+{
+	const start = tax_year_start_year(end_date);
+	return start === null ? "" : `${start}-04-06`;
 }
 
 // A pass/fail pill for one aspect of the HMRC connection state.

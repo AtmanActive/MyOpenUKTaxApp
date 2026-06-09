@@ -419,22 +419,40 @@ export function SettingsSection()
 						<TextField id="business_id" label="Business ID" value={draft.hmrc.business_id} on_change={(value) => update_hmrc({ business_id: value }, false)} hint="HMRC business ID (e.g. XAIS…), not your UTR. Use Fetch below to look it up." />
 					</div>
 
-					{/* Sandbox only: select a stubbed HMRC response. */}
+					{/* Sandbox only: mock-identity escape hatch + stubbed-response scenario. */}
 					{draft.hmrc.environment === "sandbox" ? (
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="gov_test_scenario">Sandbox test scenario (optional)</Label>
-							<Input
-								id="gov_test_scenario"
-								title="Sent as the Gov-Test-Scenario header to select a stubbed HMRC sandbox response"
-								placeholder="e.g. a scenario name from HMRC's API docs"
-								value={draft.hmrc.gov_test_scenario}
-								onChange={(event) => update_hmrc({ gov_test_scenario: event.target.value }, false)}
-							/>
-							<span className="text-xs text-muted-foreground">
-								Only used in the sandbox — sent as the Gov-Test-Scenario header so HMRC
-								returns canned data (see the HMRC API docs for scenario names).
-							</span>
-						</div>
+						<>
+							<label
+								className="flex items-center gap-2 text-sm"
+								title="Send the Gov-Test-Scenario header on the business lookup so HMRC returns its stubbed/mock test data. Turn off to test against a real identity in the sandbox."
+							>
+								<input
+									type="checkbox"
+									className="h-4 w-4"
+									checked={draft.hmrc.using_mock_identity}
+									onChange={(event) => update_hmrc({ using_mock_identity: event.target.checked }, true)}
+								/>
+								Using mock identity
+							</label>
+
+							{draft.hmrc.using_mock_identity ? (
+								<div className="flex flex-col gap-1.5">
+									<Label htmlFor="gov_test_scenario">Sandbox test scenario (optional)</Label>
+									<Input
+										id="gov_test_scenario"
+										title="Sent as the Gov-Test-Scenario header (on the business lookup) to select a stubbed HMRC sandbox response"
+										placeholder="e.g. a scenario name from HMRC's API docs (BUSINESS_AND_PROPERTY)"
+										value={draft.hmrc.gov_test_scenario}
+										onChange={(event) => update_hmrc({ gov_test_scenario: event.target.value }, false)}
+									/>
+									<span className="text-xs text-muted-foreground">
+										Sent as the Gov-Test-Scenario header on the business lookup so HMRC
+										returns canned data (see the HMRC API docs for scenario names). Not
+										sent on submissions.
+									</span>
+								</div>
+							) : null}
+						</>
 					) : null}
 
 					{/* The loopback redirect URIs to register on the HMRC Developer Hub. */}

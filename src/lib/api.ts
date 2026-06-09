@@ -88,6 +88,8 @@ export const api = {
 	hmrc_authorize: () => invoke<HmrcStatus>("hmrc_authorize"),
 	hmrc_hello_world: () => invoke<HmrcApiResult>("hmrc_hello_world"),
 	hmrc_refresh_token: () => invoke<HmrcStatus>("hmrc_refresh_token"),
-	hmrc_submit_period: (period_from: string, period_to: string) =>
-		invoke<HmrcSubmission>("hmrc_submit_period", { period_from, period_to }),
+	// Cumulative (year-to-date) submission: only the "reporting up to" date is
+	// supplied; the backend derives the tax year and the 6 April start date.
+	hmrc_submit_period: (period_end: string) =>
+		invoke<HmrcSubmission>("hmrc_submit_period", { period_end }),
 };

@@ -74,18 +74,14 @@ pub struct HmrcClient
 	http_client: reqwest::Client,
 	base_url: String,
 	logger: Arc<Logger>,
-	// True for the sandbox; gates the Gov-Test-Scenario header.
-	is_sandbox: bool,
-	// Sandbox-only scenario selector sent as the Gov-Test-Scenario header.
-	gov_test_scenario: String,
 }
 
 impl HmrcClient
 {
 	// Construct a client for the given environment ("sandbox" | "production").
-	// In the sandbox, a non-empty `gov_test_scenario` is sent on API calls to
-	// select a stubbed HMRC response.
-	pub fn new(environment: &str, logger: Arc<Logger>, gov_test_scenario: &str) -> Self
+	// The sandbox-only `Gov-Test-Scenario` header is not a client-wide concern: it
+	// is passed per call and only the business-lookup uses it (see `list_businesses`).
+	pub fn new(environment: &str, logger: Arc<Logger>) -> Self
 	{
 		let is_sandbox = environment != "production";
 		let base_url = if is_sandbox { SANDBOX_BASE_URL } else { PRODUCTION_BASE_URL }.to_string();
@@ -94,8 +90,6 @@ impl HmrcClient
 			http_client: reqwest::Client::new(),
 			base_url,
 			logger,
-			is_sandbox,
-			gov_test_scenario: gov_test_scenario.to_string(),
 		}
 	}
 
@@ -192,17 +186,22 @@ impl HmrcClient
 			None,
 			None,
 			device_id,
+			None,
 		)
 		.await
 	}
 
 	// List all businesses on the taxpayer's HMRC record. Used by the Settings
-	// screen to let the user pick their Business ID instead of typing it.
+	// screen to let the user pick their Business ID instead of typing it. This is
+	// the one call that may carry a `Gov-Test-Scenario` header: in the sandbox,
+	// when the user is testing against a mock identity, `gov_test_scenario` selects
+	// the stubbed business data (pass `None` to address a real sandbox identity).
 	pub async fn list_businesses(
 		&self,
 		access_token: &str,
 		national_insurance_number: &str,
 		device_id: &str,
+		gov_test_scenario: Option<&str>,
 	) -> AppResult<HmrcApiResult>
 	{
 		let path = format!("/individuals/business/details/{national_insurance_number}/list");
@@ -213,31 +212,38 @@ impl HmrcClient
 			Some(access_token),
 			None,
 			device_id,
+			gov_test_scenario,
 		)
 		.await
 	}
 
-	// Submit (create) a self-employment period summary for a business. The body
-	// is assembled by the command layer from the user's mapped quarterly totals.
-	pub async fn submit_self_employment_period(
+	// Create or amend the cumulative (year-to-date) self-employment summary for a
+	// business and tax year. From tax year 2025-26 onwards HMRC replaced the old
+	// per-quarter "period summary" (POST .../period, limited to 2024-25 and
+	// earlier) with this cumulative model: each call sends the running totals from
+	// the start of the tax year (6 April) up to the period end date. The body is
+	// assembled by the command layer from the user's mapped totals.
+	pub async fn submit_cumulative_period(
 		&self,
 		access_token: &str,
 		national_insurance_number: &str,
 		business_id: &str,
+		tax_year: &str,
 		period_body: serde_json::Value,
 		device_id: &str,
 	) -> AppResult<HmrcApiResult>
 	{
 		let path = format!(
-			"/individuals/business/self-employment/{national_insurance_number}/{business_id}/period"
+			"/individuals/business/self-employment/{national_insurance_number}/{business_id}/cumulative/{tax_year}"
 		);
 		self.send(
-			reqwest::Method::POST,
+			reqwest::Method::PUT,
 			&path,
 			SELF_EMPLOYMENT_BUSINESS_ACCEPT,
 			Some(access_token),
 			Some(period_body),
 			device_id,
+			None,
 		)
 		.await
 	}
@@ -252,6 +258,7 @@ impl HmrcClient
 		access_token: Option<&str>,
 		json_body: Option<serde_json::Value>,
 		device_id: &str,
+		gov_test_scenario: Option<&str>,
 	) -> AppResult<HmrcApiResult>
 	{
 		let url = format!("{}{path}", self.base_url);
@@ -275,12 +282,12 @@ impl HmrcClient
 			builder = builder.header(name, value);
 		}
 
-		// Sandbox only: select a stubbed HMRC response via Gov-Test-Scenario.
-		if self.is_sandbox && !self.gov_test_scenario.is_empty()
+		// Select a stubbed HMRC response via Gov-Test-Scenario when the caller asked
+		// for one (sandbox + mock-identity, scoped to the calls that support it).
+		if let Some(scenario) = gov_test_scenario.filter(|value| !value.is_empty())
 		{
-			builder = builder.header("Gov-Test-Scenario", self.gov_test_scenario.as_str());
-			self.logger
-				.network(&format!("Gov-Test-Scenario: {}", self.gov_test_scenario));
+			builder = builder.header("Gov-Test-Scenario", scenario);
+			self.logger.network(&format!("Gov-Test-Scenario: {scenario}"));
 		}
 
 		// Attach a JSON body when present.

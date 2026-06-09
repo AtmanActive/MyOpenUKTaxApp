@@ -15,6 +15,7 @@ use crate::hmrc::TokenResponse;
 use crate::log_debug;
 use crate::state::AppState;
 use crate::util;
+use chrono::Datelike;
 use chrono::Utc;
 use serde::Serialize;
 use std::net::Ipv4Addr;
@@ -61,14 +62,29 @@ pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<H
 {
 	state.logger.action("HMRC list businesses");
 
-	let (environment, access_token, raw_nino, device_id) = {
+	let (environment, access_token, raw_nino, device_id, using_mock_identity, gov_test_scenario) = {
 		let settings = state.lock_settings()?;
 		(
 			settings.hmrc.environment.clone(),
 			settings.hmrc.access_token.clone(),
 			settings.hmrc.national_insurance_number.clone(),
 			settings.device_id.clone(),
+			settings.hmrc.using_mock_identity,
+			settings.hmrc.gov_test_scenario.clone(),
 		)
+	};
+
+	// The Gov-Test-Scenario header is only meaningful here, and only when the user
+	// is testing a mock sandbox identity. Outside the sandbox, or against a real
+	// sandbox identity (mock-identity off), it must not be sent.
+	let is_sandbox = environment != "production";
+	let scenario = if is_sandbox && using_mock_identity && !gov_test_scenario.trim().is_empty()
+	{
+		Some(gov_test_scenario.trim().to_string())
+	}
+	else
+	{
+		None
 	};
 
 	if access_token.is_empty()
@@ -89,12 +105,10 @@ pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<H
 	let nino = normalize_nino(&raw_nino);
 	validate_nino(&nino)?;
 
-	let client = HmrcClient::new(
-		&environment,
-		state.logger.clone(),
-		&state.lock_settings()?.hmrc.gov_test_scenario,
-	);
-	let result = client.list_businesses(&access_token, &nino, &device_id).await?;
+	let client = HmrcClient::new(&environment, state.logger.clone());
+	let result = client
+		.list_businesses(&access_token, &nino, &device_id, scenario.as_deref())
+		.await?;
 
 	// Translate the HTTP status into a clear, actionable message.
 	match result.status
@@ -262,11 +276,7 @@ pub async fn hmrc_authorize(app: AppHandle, state: State<'_, AppState>) -> AppRe
 	let csrf_state = util::random_hex_token(24);
 
 	// Open the HMRC sign-in page in the default browser.
-	let client = HmrcClient::new(
-		&environment,
-		state.logger.clone(),
-		&state.lock_settings()?.hmrc.gov_test_scenario,
-	);
+	let client = HmrcClient::new(&environment, state.logger.clone());
 	let authorize_url = client.authorize_url(&client_id, &redirect_uri, &csrf_state);
 	app.opener()
 		.open_url(authorize_url, None::<&str>)
@@ -462,11 +472,7 @@ pub async fn hmrc_hello_world(state: State<'_, AppState>) -> AppResult<HmrcApiRe
 		(settings.hmrc.environment.clone(), settings.device_id.clone())
 	};
 
-	let client = HmrcClient::new(
-		&environment,
-		state.logger.clone(),
-		&state.lock_settings()?.hmrc.gov_test_scenario,
-	);
+	let client = HmrcClient::new(&environment, state.logger.clone());
 	client.hello_world(&device_id).await
 }
 
@@ -493,11 +499,7 @@ pub async fn hmrc_refresh_token(state: State<'_, AppState>) -> AppResult<HmrcSta
 		));
 	}
 
-	let client = HmrcClient::new(
-		&environment,
-		state.logger.clone(),
-		&state.lock_settings()?.hmrc.gov_test_scenario,
-	);
+	let client = HmrcClient::new(&environment, state.logger.clone());
 	let token = client
 		.refresh_access_token(&client_id, &client_secret, &refresh_token)
 		.await?;
@@ -506,19 +508,23 @@ pub async fn hmrc_refresh_token(state: State<'_, AppState>) -> AppResult<HmrcSta
 	current_status(&state)
 }
 
-// Build and submit a quarterly self-employment period summary to HMRC from the
-// user's mapped income/expense totals over the chosen window. The attempt is
-// always recorded in the submission history, whether it succeeds or fails.
+// Submit a cumulative (year-to-date) self-employment summary to HMRC from the
+// user's mapped income/expense totals. The caller supplies only the date being
+// reported up to; the period always starts at the tax-year start (6 April) and
+// the figures are aggregated over that whole window, as the cumulative model
+// requires. The attempt is always recorded in history, success or failure.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn hmrc_submit_period(
 	state: State<'_, AppState>,
-	period_from: String,
-	period_to: String,
+	period_end: String,
 ) -> AppResult<HmrcSubmission>
 {
+	// The tax year (and its 6 April start date) are derived from the end date.
+	let (period_start, tax_year) = uk_tax_year(&period_end)?;
+
 	state
 		.logger
-		.action(&format!("HMRC submit period {period_from}..{period_to}"));
+		.action(&format!("HMRC submit cumulative {tax_year} ({period_start}..{period_end})"));
 
 	// Snapshot the HMRC config we need for the call.
 	let (environment, access_token, nino, business_id, device_id) = {
@@ -545,28 +551,35 @@ pub async fn hmrc_submit_period(
 		));
 	}
 
-	// Aggregate mapped totals for the window inside a short-lived db lock.
+	// Aggregate mapped totals from the tax-year start to the end date (cumulative)
+	// inside a short-lived db lock.
 	let (totals, unmapped) = {
 		let database = state.lock_database()?;
-		let totals = database.period_totals_by_hmrc_code(&period_from, &period_to)?;
-		let unmapped = database.unmapped_event_count(&period_from, &period_to)?;
+		let totals = database.period_totals_by_hmrc_code(&period_start, &period_end)?;
+		let unmapped = database.unmapped_event_count(&period_start, &period_end)?;
 		(totals, unmapped)
 	};
 
-	let period_body = build_period_body(&period_from, &period_to, &totals, unmapped);
+	// Unmapped events cannot be attributed to an HMRC box, so they are excluded;
+	// note it in the action log so the omission is traceable.
+	if unmapped > 0
+	{
+		state.logger.action(&format!(
+			"warning: {unmapped} event(s) excluded from the {tax_year} submission for lack of an HMRC mapping"
+		));
+	}
+
+	let period_body = build_cumulative_body(&period_start, &period_end, &totals);
 	let request_json = serde_json::to_string_pretty(&period_body).unwrap_or_default();
 
 	// Perform the network call with no locks held.
-	let client = HmrcClient::new(
-		&environment,
-		state.logger.clone(),
-		&state.lock_settings()?.hmrc.gov_test_scenario,
-	);
+	let client = HmrcClient::new(&environment, state.logger.clone());
 	let api_result = client
-		.submit_self_employment_period(
+		.submit_cumulative_period(
 			&access_token,
 			&nino,
 			&business_id,
+			&tax_year,
 			period_body,
 			&device_id,
 		)
@@ -584,16 +597,17 @@ pub async fn hmrc_submit_period(
 	let reference = api_result
 		.body
 		.get("periodId")
+		.or_else(|| api_result.body.get("transactionReference"))
 		.and_then(|value| value.as_str())
 		.unwrap_or("")
 		.to_string();
 	let response_json = serde_json::to_string_pretty(&api_result.body).unwrap_or_default();
 
-	// Record the attempt in history.
+	// Record the attempt in history (storing the actual submitted window).
 	let mut database = state.lock_database()?;
 	database.record_submission(
-		&period_from,
-		&period_to,
+		&period_start,
+		&period_end,
 		&status,
 		&reference,
 		&request_json,
@@ -601,12 +615,40 @@ pub async fn hmrc_submit_period(
 	)
 }
 
-// Assemble the HMRC period-summary request body from grouped pence totals.
-fn build_period_body(
-	period_from: &str,
-	period_to: &str,
+// Derive the UK tax year for a date. The tax year starts on 6 April: dates on or
+// after 6 April belong to the year beginning that calendar year, earlier dates to
+// the previous one. Returns the 6 April start date ("YYYY-04-06") and the
+// HMRC tax-year label ("YYYY-YY").
+fn uk_tax_year(end_date: &str) -> AppResult<(String, String)>
+{
+	let date = chrono::NaiveDate::parse_from_str(end_date, "%Y-%m-%d").map_err(|_| {
+		AppError::Validation(format!(
+			"invalid period end date '{end_date}' (expected YYYY-MM-DD)"
+		))
+	})?;
+
+	let year = date.year();
+	let start_year = if date.month() > 4 || (date.month() == 4 && date.day() >= 6)
+	{
+		year
+	}
+	else
+	{
+		year - 1
+	};
+
+	let start_date = format!("{start_year}-04-06");
+	let tax_year = format!("{start_year}-{:02}", (start_year + 1) % 100);
+	Ok((start_date, tax_year))
+}
+
+// Assemble the HMRC cumulative-summary request body from grouped pence totals.
+// Empty income/expense objects are omitted (HMRC rejects empty sub-objects), and
+// no diagnostic fields are sent — only the keys HMRC defines.
+fn build_cumulative_body(
+	period_start: &str,
+	period_end: &str,
 	totals: &[(String, String, i64)],
-	unmapped: i64,
 ) -> serde_json::Value
 {
 	let mut income = serde_json::Map::new();
@@ -628,17 +670,24 @@ fn build_period_body(
 		}
 	}
 
-	serde_json::json!({
-		"periodDates": {
-			"periodStartDate": period_from,
-			"periodEndDate": period_to
-		},
-		"periodIncome": income,
-		"periodExpenses": expenses,
-		// Diagnostic only (not sent as a real HMRC field), surfaced so the UI can
-		// warn that some events were excluded for lack of a mapping.
-		"_unmappedEventCount": unmapped
-	})
+	let mut body = serde_json::Map::new();
+	body.insert(
+		"periodDates".to_string(),
+		serde_json::json!({
+			"periodStartDate": period_start,
+			"periodEndDate": period_end
+		}),
+	);
+	if !income.is_empty()
+	{
+		body.insert("periodIncome".to_string(), serde_json::Value::Object(income));
+	}
+	if !expenses.is_empty()
+	{
+		body.insert("periodExpenses".to_string(), serde_json::Value::Object(expenses));
+	}
+
+	serde_json::Value::Object(body)
 }
 
 // Persist freshly obtained tokens and compute the absolute expiry instant.
