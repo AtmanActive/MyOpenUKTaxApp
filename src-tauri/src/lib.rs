@@ -16,6 +16,7 @@ mod paths;
 mod settings;
 mod state;
 mod util;
+mod window_state;
 
 use crate::db::Database;
 use crate::error::AppResult;
@@ -23,8 +24,10 @@ use crate::logging::Logger;
 use crate::paths::AppPaths;
 use crate::settings::Settings;
 use crate::state::AppState;
+use crate::window_state::WindowState;
 use std::sync::Arc;
 use std::sync::Mutex;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run()
@@ -59,6 +62,36 @@ pub fn run()
 	tauri::Builder::default()
 		.plugin(tauri_plugin_opener::init())
 		.manage(app_state)
+		// Restore the saved window geometry/mode before the (initially hidden)
+		// window is shown, so there is no flash of a default-sized window.
+		.setup(|app| {
+			if let Some(window) = app.get_webview_window("main")
+			{
+				let app_state = app.state::<AppState>();
+				window_state::restore_on_launch(&window, &app_state);
+			}
+			// Seed the session baseline (and write the initial state file) from the
+			// settled launch geometry, so the user's very first move/resize is
+			// recognised as a customisation rather than mistaken for the baseline.
+			window_state::schedule_save(app.app_handle().clone());
+			Ok(())
+		})
+		// Track moves/resizes/maximize/minimize (debounced) and persist on close.
+		.on_window_event(|window, event| {
+			match event
+			{
+				tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_) =>
+				{
+					window_state::schedule_save(window.app_handle().clone());
+				}
+				tauri::WindowEvent::CloseRequested { .. } =>
+				{
+					window_state::save_now(window.app_handle());
+				}
+				_ =>
+				{}
+			}
+		})
 		.invoke_handler(tauri::generate_handler![
 			commands::subcategories::list_subcategories,
 			commands::subcategories::create_subcategory,
@@ -125,10 +158,16 @@ fn initialize() -> AppResult<AppState>
 		settings.backups_pruned_after_days,
 	)?;
 
+	// Load any saved window geometry/mode before paths is moved into the state.
+	let window_state = WindowState::load_or_default(&paths);
+
 	Ok(AppState {
 		paths,
 		settings: Mutex::new(settings),
 		logger,
 		database: Arc::new(Mutex::new(database)),
+		window_state: Mutex::new(window_state),
+		window_baseline: Mutex::new(None),
+		window_save_generation: std::sync::atomic::AtomicU64::new(0),
 	})
 }

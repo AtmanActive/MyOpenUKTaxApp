@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 // The settings file name lives next to the executable, as required by the spec.
 const SETTINGS_FILE_NAME: &str = "MyOpenUKTaxApp.settings.json";
+const WINDOW_STATE_FILE_NAME: &str = "MyOpenUKTaxApp.window.json";
 const DATABASE_FILE_NAME: &str = "MyOpenUKTaxApp.db";
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,14 @@ impl AppPaths
 	pub fn settings_file(&self) -> PathBuf
 	{
 		self.base_directory.join(SETTINGS_FILE_NAME)
+	}
+
+	// The exe-adjacent window-geometry JSON file (position/size/mode), kept
+	// separate from settings so frequent window writes never touch the file that
+	// holds HMRC credentials.
+	pub fn window_state_file(&self) -> PathBuf
+	{
+		self.base_directory.join(WINDOW_STATE_FILE_NAME)
 	}
 
 	// The Data/ subdirectory that holds the database and its backups.
