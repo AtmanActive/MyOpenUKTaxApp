@@ -74,18 +74,9 @@ pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<H
 		)
 	};
 
-	// The Gov-Test-Scenario header is only meaningful here, and only when the user
-	// is testing a mock sandbox identity. Outside the sandbox, or against a real
-	// sandbox identity (mock-identity off), it must not be sent.
-	let is_sandbox = environment != "production";
-	let scenario = if is_sandbox && using_mock_identity && !gov_test_scenario.trim().is_empty()
-	{
-		Some(gov_test_scenario.trim().to_string())
-	}
-	else
-	{
-		None
-	};
+	// In the sandbox with a mock identity, the configured scenario (e.g. STATEFUL)
+	// rides on the call; otherwise no scenario header.
+	let scenario = effective_scenario(&environment, using_mock_identity, &gov_test_scenario);
 
 	if access_token.is_empty()
 	{
@@ -105,10 +96,8 @@ pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<H
 	let nino = normalize_nino(&raw_nino);
 	validate_nino(&nino)?;
 
-	let client = HmrcClient::new(&environment, state.logger.clone());
-	let result = client
-		.list_businesses(&access_token, &nino, &device_id, scenario.as_deref())
-		.await?;
+	let client = HmrcClient::new(&environment, state.logger.clone(), scenario);
+	let result = client.list_businesses(&access_token, &nino, &device_id).await?;
 
 	// Translate the HTTP status into a clear, actionable message.
 	match result.status
@@ -276,7 +265,7 @@ pub async fn hmrc_authorize(app: AppHandle, state: State<'_, AppState>) -> AppRe
 	let csrf_state = util::random_hex_token(24);
 
 	// Open the HMRC sign-in page in the default browser.
-	let client = HmrcClient::new(&environment, state.logger.clone());
+	let client = HmrcClient::new(&environment, state.logger.clone(), None);
 	let authorize_url = client.authorize_url(&client_id, &redirect_uri, &csrf_state);
 	app.opener()
 		.open_url(authorize_url, None::<&str>)
@@ -472,7 +461,7 @@ pub async fn hmrc_hello_world(state: State<'_, AppState>) -> AppResult<HmrcApiRe
 		(settings.hmrc.environment.clone(), settings.device_id.clone())
 	};
 
-	let client = HmrcClient::new(&environment, state.logger.clone());
+	let client = HmrcClient::new(&environment, state.logger.clone(), None);
 	client.hello_world(&device_id).await
 }
 
@@ -499,7 +488,7 @@ pub async fn hmrc_refresh_token(state: State<'_, AppState>) -> AppResult<HmrcSta
 		));
 	}
 
-	let client = HmrcClient::new(&environment, state.logger.clone());
+	let client = HmrcClient::new(&environment, state.logger.clone(), None);
 	let token = client
 		.refresh_access_token(&client_id, &client_secret, &refresh_token)
 		.await?;
@@ -527,7 +516,7 @@ pub async fn hmrc_submit_period(
 		.action(&format!("HMRC submit cumulative {tax_year} ({period_start}..{period_end})"));
 
 	// Snapshot the HMRC config we need for the call.
-	let (environment, access_token, nino, business_id, device_id) = {
+	let (environment, access_token, nino, business_id, device_id, using_mock_identity, gov_test_scenario) = {
 		let settings = state.lock_settings()?;
 		(
 			settings.hmrc.environment.clone(),
@@ -535,6 +524,8 @@ pub async fn hmrc_submit_period(
 			settings.hmrc.national_insurance_number.clone(),
 			settings.hmrc.business_id.clone(),
 			settings.device_id.clone(),
+			settings.hmrc.using_mock_identity,
+			settings.hmrc.gov_test_scenario.clone(),
 		)
 	};
 
@@ -572,8 +563,10 @@ pub async fn hmrc_submit_period(
 	let period_body = build_cumulative_body(&period_start, &period_end, &totals);
 	let request_json = serde_json::to_string_pretty(&period_body).unwrap_or_default();
 
-	// Perform the network call with no locks held.
-	let client = HmrcClient::new(&environment, state.logger.clone());
+	// Perform the network call with no locks held. In stateful sandbox mode the
+	// configured scenario (e.g. STATEFUL) rides on the submission too.
+	let scenario = effective_scenario(&environment, using_mock_identity, &gov_test_scenario);
+	let client = HmrcClient::new(&environment, state.logger.clone(), scenario);
 	let api_result = client
 		.submit_cumulative_period(
 			&access_token,
@@ -717,4 +710,340 @@ fn current_status(state: &State<'_, AppState>) -> AppResult<HmrcStatus>
 		environment: settings.hmrc.environment.clone(),
 		token_expires_at_epoch_seconds: settings.hmrc.token_expires_at_epoch_seconds,
 	})
+}
+
+// ---- Read-only "HMRC Get" commands ----
+//
+// These retrieve HMRC's authoritative state. Each returns the raw HmrcApiResult
+// (HTTP status + JSON body) and does NOT turn a non-2xx into an error, so the UI
+// can show exactly what HMRC reports per card — including a 404 when the
+// application is not subscribed to the relevant API.
+
+// The effective Gov-Test-Scenario to send on API calls: only in the sandbox, only
+// when the user is testing a mock identity, and only when a scenario is set.
+fn effective_scenario(environment: &str, using_mock_identity: bool, gov_test_scenario: &str) -> Option<String>
+{
+	let is_sandbox = environment != "production";
+	if is_sandbox && using_mock_identity && !gov_test_scenario.trim().is_empty()
+	{
+		Some(gov_test_scenario.trim().to_string())
+	}
+	else
+	{
+		None
+	}
+}
+
+// The HMRC config common to every read call, snapshotted out of the settings lock.
+struct HmrcReadContext
+{
+	environment: String,
+	access_token: String,
+	nino: String,
+	business_id: String,
+	device_id: String,
+	scenario: Option<String>,
+}
+
+// Snapshot + validate the config a read call needs. `require_business` enforces a
+// configured Business ID for the per-business endpoints.
+fn hmrc_read_context(state: &State<'_, AppState>, require_business: bool) -> AppResult<HmrcReadContext>
+{
+	let (environment, access_token, raw_nino, business_id, device_id, using_mock_identity, gov_test_scenario) = {
+		let settings = state.lock_settings()?;
+		(
+			settings.hmrc.environment.clone(),
+			settings.hmrc.access_token.clone(),
+			settings.hmrc.national_insurance_number.clone(),
+			settings.hmrc.business_id.clone(),
+			settings.device_id.clone(),
+			settings.hmrc.using_mock_identity,
+			settings.hmrc.gov_test_scenario.clone(),
+		)
+	};
+
+	if access_token.is_empty()
+	{
+		return Err(AppError::HmrcNotConfigured(
+			"Authorise the app with HMRC first (HMRC Connection screen).".to_string(),
+		));
+	}
+	let nino = normalize_nino(&raw_nino);
+	validate_nino(&nino)?;
+	if require_business && business_id.trim().is_empty()
+	{
+		return Err(AppError::HmrcNotConfigured(
+			"Set your Business ID on the HMRC Connection screen first.".to_string(),
+		));
+	}
+
+	let scenario = effective_scenario(&environment, using_mock_identity, &gov_test_scenario);
+	Ok(HmrcReadContext { environment, access_token, nino, business_id, device_id, scenario })
+}
+
+// Retrieve the business details HMRC holds for the configured business.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_get_business_details(state: State<'_, AppState>) -> AppResult<HmrcApiResult>
+{
+	let context = hmrc_read_context(&state, true)?;
+	state.logger.action("HMRC get business details");
+	let client = HmrcClient::new(&context.environment, state.logger.clone(), context.scenario.clone());
+	client
+		.retrieve_business_details(&context.access_token, &context.nino, &context.business_id, &context.device_id)
+		.await
+}
+
+// Retrieve the quarterly (income & expenditure) obligations for the business.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_get_obligations_quarterly(state: State<'_, AppState>) -> AppResult<HmrcApiResult>
+{
+	let context = hmrc_read_context(&state, true)?;
+	state.logger.action("HMRC get quarterly obligations");
+	let client = HmrcClient::new(&context.environment, state.logger.clone(), context.scenario.clone());
+	client
+		.get_obligations_quarterly(
+			&context.access_token,
+			&context.nino,
+			Some("self-employment"),
+			Some(&context.business_id),
+			&context.device_id,
+		)
+		.await
+}
+
+// Retrieve the final-declaration (crystallisation) obligations for a tax year
+// (pass an empty string to let HMRC default to the last four years).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_get_obligations_final_declaration(
+	state: State<'_, AppState>,
+	tax_year: String,
+) -> AppResult<HmrcApiResult>
+{
+	let context = hmrc_read_context(&state, false)?;
+	state.logger.action("HMRC get final-declaration obligations");
+	let client = HmrcClient::new(&context.environment, state.logger.clone(), context.scenario.clone());
+	let tax_year = if tax_year.trim().is_empty() { None } else { Some(tax_year.trim()) };
+	client
+		.get_obligations_final_declaration(&context.access_token, &context.nino, tax_year, &context.device_id)
+		.await
+}
+
+// Retrieve the cumulative (year-to-date) self-employment summary HMRC holds.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_get_cumulative(state: State<'_, AppState>, tax_year: String) -> AppResult<HmrcApiResult>
+{
+	let context = hmrc_read_context(&state, true)?;
+	state.logger.action(&format!("HMRC get cumulative {tax_year}"));
+	let client = HmrcClient::new(&context.environment, state.logger.clone(), context.scenario.clone());
+	client
+		.get_cumulative(&context.access_token, &context.nino, &context.business_id, tax_year.trim(), &context.device_id)
+		.await
+}
+
+// Retrieve the self-employment annual submission for a tax year.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_get_annual(state: State<'_, AppState>, tax_year: String) -> AppResult<HmrcApiResult>
+{
+	let context = hmrc_read_context(&state, true)?;
+	state.logger.action(&format!("HMRC get annual {tax_year}"));
+	let client = HmrcClient::new(&context.environment, state.logger.clone(), context.scenario.clone());
+	client
+		.get_annual(&context.access_token, &context.nino, &context.business_id, tax_year.trim(), &context.device_id)
+		.await
+}
+
+// Retrieve the list of (legacy) period summaries for a tax year.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_get_period_summaries(state: State<'_, AppState>, tax_year: String) -> AppResult<HmrcApiResult>
+{
+	let context = hmrc_read_context(&state, true)?;
+	state.logger.action(&format!("HMRC get period summaries {tax_year}"));
+	let client = HmrcClient::new(&context.environment, state.logger.clone(), context.scenario.clone());
+	client
+		.list_period_summaries(&context.access_token, &context.nino, &context.business_id, tax_year.trim(), &context.device_id)
+		.await
+}
+
+// ---- Phase 2: optional APIs (need their own Developer Hub subscription) ----
+// These return HMRC's response as-is; a 404 means the application is not
+// subscribed to that API yet.
+
+// Business Income Source Summary (BISS): HMRC's computed income/expense summary
+// for one self-employment business and tax year.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_get_biss(state: State<'_, AppState>, tax_year: String) -> AppResult<HmrcApiResult>
+{
+	let context = hmrc_read_context(&state, true)?;
+	state.logger.action(&format!("HMRC get BISS {tax_year}"));
+	let client = HmrcClient::new(&context.environment, state.logger.clone(), context.scenario.clone());
+	let path = format!(
+		"/individuals/self-assessment/income-summary/{}/self-employment/{}/{}",
+		context.nino,
+		tax_year.trim(),
+		context.business_id,
+	);
+	client
+		.get_raw(&context.access_token, &path, crate::hmrc::BISS_ACCEPT, &context.device_id)
+		.await
+}
+
+// Individual Calculations: the list of tax calculations HMRC holds for a year.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_get_calculations(state: State<'_, AppState>, tax_year: String) -> AppResult<HmrcApiResult>
+{
+	let context = hmrc_read_context(&state, false)?;
+	state.logger.action(&format!("HMRC get calculations {tax_year}"));
+	let client = HmrcClient::new(&context.environment, state.logger.clone(), context.scenario.clone());
+	let path = format!("/individuals/calculations/{}/self-assessment/{}", context.nino, tax_year.trim());
+	client
+		.get_raw(&context.access_token, &path, crate::hmrc::CALCULATIONS_ACCEPT, &context.device_id)
+		.await
+}
+
+// Self Assessment Accounts: the customer's open balance and transactions (what is
+// owed/paid). Uses onlyOpenItems=true so no date range is required.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_get_sa_account(state: State<'_, AppState>) -> AppResult<HmrcApiResult>
+{
+	let context = hmrc_read_context(&state, false)?;
+	state.logger.action("HMRC get self assessment account");
+	let client = HmrcClient::new(&context.environment, state.logger.clone(), context.scenario.clone());
+	let path = format!("/accounts/self-assessment/{}/balance-and-transactions?onlyOpenItems=true", context.nino);
+	client
+		.get_raw(&context.access_token, &path, crate::hmrc::SA_ACCOUNTS_ACCEPT, &context.device_id)
+		.await
+}
+
+// ---- Sandbox-only: seed stateful test data (MTD SA Test Support API) ----
+
+// The outcome of a test-data setup run, shown to the user.
+#[derive(Debug, Serialize)]
+pub struct TestDataSetup
+{
+	pub business_id: String,
+	pub business_created: bool,
+	pub itsa_status_http: u16,
+	// RFC3339 instant this run seeded the data (HMRC keeps it ~7 days).
+	pub seeded_at: String,
+	pub message: String,
+}
+
+// Idempotently provision a stateful test business + ITSA status for the test user,
+// so submissions read back and obligations generate. Sandbox only. Re-running
+// reuses an existing self-employment business rather than creating a duplicate.
+// All calls use the STATEFUL scenario regardless of the configured one, since that
+// is the whole point of this helper.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn hmrc_setup_test_data(state: State<'_, AppState>, tax_year: String) -> AppResult<TestDataSetup>
+{
+	let context = hmrc_read_context(&state, false)?;
+	if context.environment == "production"
+	{
+		return Err(AppError::Validation(
+			"Setting up test data is only available in the sandbox.".to_string(),
+		));
+	}
+	state.logger.action(&format!("HMRC set up test data {tax_year}"));
+
+	// Reads use a STATEFUL client (to see the stateful store). The test-support
+	// seeding endpoints reject a Gov-Test-Scenario, so they use a scenario-less
+	// client.
+	let stateful_client =
+		HmrcClient::new(&context.environment, state.logger.clone(), Some("STATEFUL".to_string()));
+	let support_client = HmrcClient::new(&context.environment, state.logger.clone(), None);
+
+	// 1. Idempotent: reuse an existing self-employment business if one exists.
+	let list = stateful_client
+		.list_businesses(&context.access_token, &context.nino, &context.device_id)
+		.await?;
+	let existing = list
+		.body
+		.get("listOfBusinesses")
+		.and_then(|value| value.as_array())
+		.and_then(|businesses| {
+			businesses.iter().find(|business| {
+				business.get("typeOfBusiness").and_then(|t| t.as_str()) == Some("self-employment")
+			})
+		})
+		.and_then(|business| business.get("businessId").and_then(|id| id.as_str()))
+		.map(|id| id.to_string());
+
+	let (business_id, business_created) = if let Some(id) = existing
+	{
+		(id, false)
+	}
+	else
+	{
+		let body = serde_json::json!({
+			"typeOfBusiness": "self-employment",
+			"tradingName": "MyOpenUKTaxApp Test Trade",
+			"commencementDate": "2016-09-24",
+			"businessAddressLineOne": "1 Test Road",
+			"businessAddressCountryCode": "GB",
+			"businessAddressPostcode": "M1 1AG"
+		});
+		let created = support_client
+			.create_test_business(&context.access_token, &context.nino, body, &context.device_id)
+			.await?;
+		if !(200..300).contains(&created.status)
+		{
+			return Err(AppError::Network(format!(
+				"Create test business failed (HTTP {}): {}",
+				created.status, created.body
+			)));
+		}
+		let id = created
+			.body
+			.get("businessId")
+			.and_then(|value| value.as_str())
+			.ok_or_else(|| AppError::Network("Create test business returned no businessId.".to_string()))?
+			.to_string();
+		(id, true)
+	};
+
+	// Persist the business id (short-lived lock, no await held).
+	{
+		let mut settings = state.lock_settings()?;
+		settings.hmrc.business_id = business_id.clone();
+		settings.save(&state.paths)?;
+	}
+
+	// 2. Set the ITSA status so obligations are generated (amend-safe to repeat).
+	let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+	let itsa_body = serde_json::json!({
+		"itsaStatusDetails": [
+			{
+				"submittedOn": now,
+				"status": "MTD Mandated",
+				"statusReason": "Sign up - no return available"
+			}
+		]
+	});
+	let itsa = support_client
+		.create_test_itsa_status(&context.access_token, &context.nino, tax_year.trim(), itsa_body, &context.device_id)
+		.await?;
+
+	// Record when the test data was (re)seeded so the UI can show the 7-day expiry.
+	let seeded_at = Utc::now().to_rfc3339();
+	{
+		let database = state.lock_database()?;
+		database.set_meta("test_data_seeded_at", &seeded_at)?;
+	}
+
+	let message = format!(
+		"{} business {business_id}; ITSA status set for {} (HTTP {}).",
+		if business_created { "Created test" } else { "Reusing existing" },
+		tax_year.trim(),
+		itsa.status,
+	);
+
+	Ok(TestDataSetup { business_id, business_created, itsa_status_http: itsa.status, seeded_at, message })
+}
+
+// When the sandbox test data was last seeded (RFC3339), or None if never. Drives
+// the "set up on / expires around" note on the HMRC Connection screen.
+#[tauri::command(rename_all = "snake_case")]
+pub fn hmrc_test_data_seeded_at(state: State<'_, AppState>) -> AppResult<Option<String>>
+{
+	state.lock_database()?.get_meta("test_data_seeded_at")
 }

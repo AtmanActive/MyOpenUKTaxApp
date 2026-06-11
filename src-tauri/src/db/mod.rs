@@ -16,6 +16,7 @@ use chrono::Utc;
 use models::*;
 use rusqlite::params;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -181,6 +182,39 @@ impl Database
 			self.connection.execute_batch("PRAGMA user_version = 1;")?;
 		}
 
+		// v1 -> v2: a simple key/value table for small app metadata (e.g. when the
+		// sandbox test data was last seeded).
+		if current_version < 2
+		{
+			self.connection.execute_batch(
+				"CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+				 PRAGMA user_version = 2;",
+			)?;
+		}
+
+		Ok(())
+	}
+
+	// Read a value from the app_meta key/value table (None if the key is absent).
+	pub fn get_meta(&self, key: &str) -> AppResult<Option<String>>
+	{
+		let value = self
+			.connection
+			.query_row("SELECT value FROM app_meta WHERE key = ?1", params![key], |row| {
+				row.get::<_, String>(0)
+			})
+			.optional()?;
+		Ok(value)
+	}
+
+	// Insert or update a value in the app_meta key/value table.
+	pub fn set_meta(&self, key: &str, value: &str) -> AppResult<()>
+	{
+		self.connection.execute(
+			"INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			params![key, value],
+		)?;
 		Ok(())
 	}
 

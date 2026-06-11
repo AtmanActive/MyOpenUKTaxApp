@@ -87,11 +87,11 @@ fn default_using_mock_identity() -> bool
 	true
 }
 
-// A sensible first scenario for the sandbox business lookup: HMRC's stubbed
-// self-employment + property test data. Users can change or clear it.
+// Default sandbox scenario: STATEFUL, so created test data submits and reads back
+// (the whole stateful-testing workflow). Users can change or clear it.
 fn default_gov_test_scenario() -> String
 {
-	"BUSINESS_AND_PROPERTY".to_string()
+	"STATEFUL".to_string()
 }
 
 fn default_oauth_redirect_ports() -> Vec<u16>

@@ -12,8 +12,13 @@ export type SectionId =
 	| "events"
 	| "subcategories"
 	| "mapping"
+	| "hmrc-connection"
 	| "hmrc"
+	| "hmrc-get"
 	| "settings";
+
+// The HMRC connection LED state shown next to the HMRC Connection sidebar item.
+export type HmrcConnection = "unknown" | "connecting" | "connected" | "failed";
 
 // Static metadata for each sidebar entry. `icon` is a Material Symbols name.
 export interface SectionMeta
@@ -30,8 +35,10 @@ export const SECTIONS: SectionMeta[] = [
 	{ id: "events", label: "Events", icon: "receipt_long", hint: "Browse and filter recorded events" },
 	{ id: "subcategories", label: "Categories", icon: "category", hint: "Manage your income and expense categories" },
 	{ id: "mapping", label: "Mapping", icon: "swap_horiz", hint: "Map your categories to HMRC categories" },
-	{ id: "hmrc", label: "HMRC", icon: "cloud_upload", hint: "Submit quarterly data and view post history" },
-	{ id: "settings", label: "Settings", icon: "settings", hint: "Application settings and HMRC connection" },
+	{ id: "hmrc-connection", label: "HMRC Connection", icon: "key", hint: "HMRC credentials, sign-in and connection" },
+	{ id: "hmrc", label: "HMRC Put", icon: "cloud_upload", hint: "Submit quarterly data and view post history" },
+	{ id: "hmrc-get", label: "HMRC Get", icon: "cloud_download", hint: "Live data retrieved from HMRC — the source of truth" },
+	{ id: "settings", label: "Settings", icon: "settings", hint: "Application settings" },
 ];
 
 interface AppUiState
@@ -58,6 +65,11 @@ interface AppUiState
 	// as feedback under the Add Event form. In-memory only; not persisted.
 	recent_events: LedgerEvent[];
 	add_recent_event: (event: LedgerEvent) => void;
+
+	// HMRC connection LED state, driven by the HMRC Connection screen's actions and
+	// the status query. Shown as a coloured dot in the sidebar.
+	hmrc_connection: HmrcConnection;
+	set_hmrc_connection: (state: HmrcConnection) => void;
 }
 
 export const use_app_store = create<AppUiState>((set) => ({
@@ -77,4 +89,7 @@ export const use_app_store = create<AppUiState>((set) => ({
 	recent_events: [],
 	add_recent_event: (event) =>
 		set((state) => ({ recent_events: [event, ...state.recent_events].slice(0, 3) })),
+
+	hmrc_connection: "unknown",
+	set_hmrc_connection: (hmrc_connection) => set({ hmrc_connection }),
 }));

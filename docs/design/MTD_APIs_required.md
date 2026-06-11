@@ -15,11 +15,14 @@ or a version is bumped.
 
 ## APIs the code calls
 
-| HMRC Developer Hub API | Version | Endpoint(s) used | Auth | Purpose |
-|------------------------|---------|------------------|------|---------|
-| Hello World | 1.0 | `GET /hello/world` | none (open) | Connectivity test ("Test connection") |
-| Business Details (MTD) | 2.0 | `GET /individuals/business/details/{nino}/list` | user-restricted | List businesses → pick/auto-fill the Business ID |
-| Self Employment Business (MTD) | 5.0 | `PUT /individuals/business/self-employment/{nino}/{businessId}/cumulative/{taxYear}` | user-restricted | Submit a cumulative (year-to-date) period summary |
+### Required (Phase 1) — must be subscribed for the app to work
+
+| HMRC Developer Hub API | Version | Endpoint(s) used | Screen | Purpose |
+|------------------------|---------|------------------|--------|---------|
+| Hello World | 1.0 | `GET /hello/world` | HMRC Put | Connectivity test ("Test connection") |
+| Business Details (MTD) | 2.0 | `GET /individuals/business/details/{nino}/list` · `GET .../details/{nino}/{businessId}` | HMRC Put / Get | List businesses (pick Business ID) · retrieve one business's details |
+| Self Employment Business (MTD) | 5.0 | `PUT .../self-employment/{nino}/{businessId}/cumulative/{taxYear}` (submit) · `GET .../cumulative/{taxYear}` · `GET .../annual/{taxYear}` · `GET .../period/{taxYear}` | HMRC Put / Get | Submit + read back the cumulative summary, annual submission, legacy period summaries |
+| Obligations (MTD) | 3.0 | `GET /obligations/details/{nino}/income-and-expenditure` · `GET .../crystallisation` | HMRC Get | Quarterly + final-declaration obligation status (open/fulfilled) |
 
 > **Note (Self Employment Business 5.0 — cumulative model):** from tax year
 > **2025-26 onwards** HMRC replaced the per-quarter "Create Period Summary"
@@ -32,13 +35,26 @@ or a version is bumped.
 > (HMRC category codes → amounts). Built by `build_cumulative_body` and sent by
 > `submit_cumulative_period`. Submitting a date in an unsupported tax year (e.g. a
 > current-year date to the old `period` endpoint) returns HTTP 400
-> `RULE_TAX_YEAR_NOT_SUPPORTED`.
+> `RULE_TAX_YEAR_NOT_SUPPORTED`. The legacy `GET .../period/{taxYear}` likewise
+> only returns data for ≤2024-25.
 
-> **Sandbox note:** the `Gov-Test-Scenario` set in Settings is sent on *all* API
-> calls. A scenario chosen for the business lookup (e.g. `BUSINESS_AND_PROPERTY`)
-> is **not** valid for the cumulative submission — clear the field (or pick a
-> submission-appropriate scenario) to get the default success response when
-> testing a submit.
+### Optional (Phase 2) — "HMRC Get" cards that 404 until subscribed
+
+| HMRC Developer Hub API | Version | Endpoint used | Purpose |
+|------------------------|---------|---------------|---------|
+| Business Income Source Summary (MTD) | 3.0 | `GET /individuals/self-assessment/income-summary/{nino}/{typeOfBusiness}/{taxYear}/{businessId}` | HMRC's computed income/expense summary per business |
+| Individual Calculations (MTD) | 8.0 | `GET /individuals/calculations/{nino}/self-assessment/{taxYear}` | List of tax calculations for the year |
+| Self Assessment Accounts (MTD) | 4.0 | `GET /accounts/self-assessment/{nino}/balance-and-transactions?onlyOpenItems=true` | Open balance, charges and payments |
+
+> **Sandbox note (Gov-Test-Scenario):** the scenario header is **only** sent on the
+> Business Details *List Businesses* call, and only when Settings has Sandbox +
+> "Using mock identity" on with a non-empty scenario. It is **not** sent on
+> submissions or on any "HMRC Get" read. If a sandbox GET needs a scenario to
+> return stub data, add per-endpoint scenario support (not currently implemented).
+
+> **Version constants:** the `*_ACCEPT` constants in
+> [`src-tauri/src/hmrc/mod.rs`](../../src-tauri/src/hmrc/mod.rs) are the single
+> source of truth for the versions above — keep this table in sync with them.
 
 ## OAuth (authorisation-code flow)
 

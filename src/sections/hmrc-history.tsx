@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
+import { JsonBlock } from "@/components/ui/json-block";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -23,84 +24,19 @@ import {
 } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { format_datetime } from "@/lib/format";
-import { use_app_store } from "@/store/app-store";
 import { notify_error, use_notify } from "@/store/notify";
 
 export function HmrcHistorySection()
 {
 	const push = use_notify((state) => state.push);
-	const set_active_section = use_app_store((state) => state.set_active_section);
 	const query_client = useQueryClient();
 
 	const [period_end, set_period_end] = useState("");
 	const [expanded_id, set_expanded_id] = useState<number | null>(null);
 
-	const status_query = useQuery({ queryKey: ["hmrc_status"], queryFn: () => api.hmrc_status() });
 	const submissions_query = useQuery({
 		queryKey: ["hmrc_submissions"],
 		queryFn: () => api.list_hmrc_submissions(),
-	});
-
-	const refresh_status = () => void query_client.invalidateQueries({ queryKey: ["hmrc_status"] });
-
-	const test_mutation = useMutation({
-		mutationFn: () => api.hmrc_hello_world(),
-		onSuccess: (result) => push("info", `HMRC responded: HTTP ${result.status}`),
-		onError: (error) => notify_error(error),
-	});
-
-	// After authorising, validate that the signed-in account matches the entered
-	// NINO and pre-fill the Business ID. The read-only List Businesses call is the
-	// validator: 200 ⇒ authorised; the backend turns 401/403/400 into clear text.
-	const connect_check_mutation = useMutation({
-		mutationFn: () => api.hmrc_list_businesses(),
-		onSuccess: async (list) =>
-		{
-			if (list.length === 0)
-			{
-				push("info", "Authorised, but HMRC shows no businesses for this account/NINO.");
-				return;
-			}
-			if (list.length === 1)
-			{
-				try
-				{
-					await api.hmrc_set_business_id(list[0].business_id);
-					void query_client.invalidateQueries({ queryKey: ["hmrc_status"] });
-					void query_client.invalidateQueries({ queryKey: ["settings"] });
-					push("success", `Connected — using your business (${list[0].business_id}).`);
-				}
-				catch (error)
-				{
-					notify_error(error);
-				}
-				return;
-			}
-			push("info", `Connected — found ${list.length} businesses. Pick one on the Settings screen.`);
-		},
-		onError: (error) => notify_error(error),
-	});
-
-	const authorize_mutation = useMutation({
-		mutationFn: () => api.hmrc_authorize(),
-		onSuccess: () =>
-		{
-			push("success", "Authorised — access token stored.");
-			refresh_status();
-			// Validate the NINO ↔ account pairing and pre-fill the Business ID.
-			connect_check_mutation.mutate();
-		},
-		onError: (error) => notify_error(error),
-	});
-
-	const refresh_token_mutation = useMutation({
-		mutationFn: () => api.hmrc_refresh_token(),
-		onSuccess: () =>
-		{
-			push("success", "Access token refreshed.");
-			refresh_status();
-		},
-		onError: (error) => notify_error(error),
 	});
 
 	const submit_mutation = useMutation({
@@ -120,72 +56,8 @@ export function HmrcHistorySection()
 		onError: (error) => notify_error(error),
 	});
 
-	const status = status_query.data;
-
 	return (
 		<div className="flex flex-col gap-4">
-			<Card>
-				<CardHeader>
-					<CardTitle>HMRC connection</CardTitle>
-				</CardHeader>
-				<CardContent className="flex flex-col gap-4">
-					{status_query.isLoading || !status ? (
-						<Spinner label="Checking status…" />
-					) : (
-						<>
-							<div className="flex flex-wrap gap-2">
-								<StatusBadge ok={status.configured} ok_text={`client configured (${status.environment})`} bad_text="client id not set" />
-								<StatusBadge ok={status.business_configured} ok_text="NINO & business id set" bad_text="NINO / business id missing" />
-								<StatusBadge ok={status.has_token} ok_text="access token present" bad_text="not authorised" />
-							</div>
-
-							{!status.configured ? (
-								<p className="text-sm text-muted-foreground">
-									Set your HMRC credentials on the{" "}
-									<button className="underline" onClick={() => set_active_section("settings")}>
-										Settings
-									</button>{" "}
-									screen first.
-								</p>
-							) : null}
-
-							<div className="flex flex-wrap gap-2">
-								<Button variant="outline" title="Check connectivity to HMRC (no sign-in needed)" onClick={() => test_mutation.mutate()} disabled={test_mutation.isPending}>
-									<Icon name="wifi_tethering" /> Test connection
-								</Button>
-								<Button
-									title="Sign in to HMRC in your browser; the app captures the result automatically"
-									onClick={() => authorize_mutation.mutate()}
-									disabled={
-										!status.configured ||
-										authorize_mutation.isPending ||
-										connect_check_mutation.isPending
-									}
-								>
-									<Icon name="login" />
-									{authorize_mutation.isPending
-										? "Waiting for sign-in…"
-										: connect_check_mutation.isPending
-											? "Checking access…"
-											: "Authorise with HMRC"}
-								</Button>
-								<Button variant="outline" title="Refresh the access token" onClick={() => refresh_token_mutation.mutate()} disabled={!status.has_token || refresh_token_mutation.isPending}>
-									<Icon name="autorenew" /> Refresh token
-								</Button>
-							</div>
-
-							{authorize_mutation.isPending ? (
-								<p className="flex items-center gap-2 text-sm text-muted-foreground">
-									<Icon name="open_in_new" className="text-base" />
-									Complete the sign-in in your browser — this screen is waiting for HMRC to
-									redirect back, then it finishes automatically.
-								</p>
-							) : null}
-						</>
-					)}
-				</CardContent>
-			</Card>
-
 			<Card>
 				<CardHeader>
 					<CardTitle>Submit cumulative period (year-to-date)</CardTitle>
@@ -265,8 +137,8 @@ export function HmrcHistorySection()
 											<TableRow>
 												<TableCell colSpan={5}>
 													<div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-														<JsonBlock title="Request" json={submission.request_json} />
-														<JsonBlock title="Response" json={submission.response_json} />
+														<JsonBlock title="Request" data={submission.request_json} />
+														<JsonBlock title="Response" data={submission.response_json} />
 													</div>
 												</TableCell>
 											</TableRow>
@@ -317,33 +189,4 @@ function tax_year_start(end_date: string): string
 {
 	const start = tax_year_start_year(end_date);
 	return start === null ? "" : `${start}-04-06`;
-}
-
-// A pass/fail pill for one aspect of the HMRC connection state.
-function StatusBadge(props: { ok: boolean; ok_text: string; bad_text: string })
-{
-	return (
-		<span
-			className={
-				"inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium " +
-				(props.ok ? "bg-income text-income-foreground" : "bg-muted text-muted-foreground")
-			}
-		>
-			<Icon name={props.ok ? "check_circle" : "radio_button_unchecked"} className="text-sm" />
-			{props.ok ? props.ok_text : props.bad_text}
-		</span>
-	);
-}
-
-// A scrollable monospaced JSON viewer used in the expanded history rows.
-function JsonBlock(props: { title: string; json: string })
-{
-	return (
-		<div>
-			<p className="mb-1 text-xs font-semibold text-muted-foreground">{props.title}</p>
-			<pre className="max-h-64 overflow-auto rounded-md bg-muted p-2 text-xs">
-				{props.json || "—"}
-			</pre>
-		</div>
-	);
 }

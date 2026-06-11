@@ -123,6 +123,17 @@ pub fn run()
 			commands::hmrc_cmds::hmrc_hello_world,
 			commands::hmrc_cmds::hmrc_refresh_token,
 			commands::hmrc_cmds::hmrc_submit_period,
+			commands::hmrc_cmds::hmrc_get_business_details,
+			commands::hmrc_cmds::hmrc_get_obligations_quarterly,
+			commands::hmrc_cmds::hmrc_get_obligations_final_declaration,
+			commands::hmrc_cmds::hmrc_get_cumulative,
+			commands::hmrc_cmds::hmrc_get_annual,
+			commands::hmrc_cmds::hmrc_get_period_summaries,
+			commands::hmrc_cmds::hmrc_get_biss,
+			commands::hmrc_cmds::hmrc_get_calculations,
+			commands::hmrc_cmds::hmrc_get_sa_account,
+			commands::hmrc_cmds::hmrc_setup_test_data,
+			commands::hmrc_cmds::hmrc_test_data_seeded_at,
 		])
 		.run(tauri::generate_context!())
 		.expect("error while running tauri application");

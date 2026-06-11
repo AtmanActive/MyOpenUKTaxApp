@@ -181,6 +181,15 @@ export interface HmrcApiResult
 	body: unknown;
 }
 
+export interface TestDataSetup
+{
+	business_id: string;
+	business_created: boolean;
+	itsa_status_http: number;
+	seeded_at: string;
+	message: string;
+}
+
 // The allowed appearance options, kept in sync with the Rust settings validator.
 export const THEME_OPTIONS = ["system", "light", "dark"] as const;
 export const FONT_SIZE_OPTIONS = [

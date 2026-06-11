@@ -5,7 +5,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Icon } from "@/components/ui/icon";
 import { cn } from "@/lib/utils";
-import { SECTIONS, use_app_store, type SectionId } from "@/store/app-store";
+import { SECTIONS, use_app_store, type HmrcConnection, type SectionId } from "@/store/app-store";
 
 interface SidebarProps
 {
@@ -17,6 +17,7 @@ export function Sidebar({ orientation }: SidebarProps)
 	const active_section = use_app_store((state) => state.active_section);
 	const set_active_section = use_app_store((state) => state.set_active_section);
 	const new_event = use_app_store((state) => state.new_event);
+	const hmrc_connection = use_app_store((state) => state.hmrc_connection);
 
 	const is_vertical = orientation === "vertical";
 
@@ -77,6 +78,9 @@ export function Sidebar({ orientation }: SidebarProps)
 									<Icon name={section.icon} className="text-xl" />
 								)}
 							<span className={cn(!is_vertical && "text-[0.65rem]")}>{section.label}</span>
+							{section.id === "hmrc-connection" ? (
+									<ConnectionLed state={hmrc_connection} vertical={is_vertical} />
+								) : null}
 						</button>
 					);
 				})}
@@ -95,5 +99,33 @@ export function Sidebar({ orientation }: SidebarProps)
 				<span className={cn(!is_vertical && "text-[0.65rem]")}>Exit</span>
 			</button>
 		</nav>
+	);
+}
+
+// A small round LED reflecting the HMRC connection state next to its menu item.
+function ConnectionLed({ state, vertical }: { state: HmrcConnection; vertical: boolean })
+{
+	const colour =
+		state === "connected"
+			? "bg-green-500"
+			: state === "failed"
+				? "bg-red-500"
+				: state === "connecting"
+					? "bg-cyan-400 animate-pulse"
+					: "bg-gray-400";
+	const label =
+		state === "connected"
+			? "Connected to HMRC"
+			: state === "failed"
+				? "HMRC connection failed"
+				: state === "connecting"
+					? "Connecting to HMRC…"
+					: "HMRC not connected";
+	return (
+		<span
+			title={label}
+			aria-label={label}
+			className={cn("h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/20", colour, vertical && "ml-auto")}
+		/>
 	);
 }

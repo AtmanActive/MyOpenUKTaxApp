@@ -24,35 +24,20 @@ import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import {
 	FONT_SIZE_OPTIONS,
-	HMRC_ENVIRONMENT_OPTIONS,
 	THEME_OPTIONS,
-	type HmrcBusiness,
 	type Settings,
 	type UpdateCheck,
 } from "@/lib/types";
-import { notify_error, use_notify } from "@/store/notify";
+import { notify_error } from "@/store/notify";
 
 type SaveStatus = "idle" | "saving" | "saved";
 
 // How long to wait after the last keystroke before persisting a text/number field.
 const DEBOUNCE_MS = 500;
 
-// Normalise a NINO as typed: upper-case, drop spaces, cap at 9 characters.
-function normalize_nino(value: string): string
-{
-	return value.toUpperCase().replace(/\s+/g, "").slice(0, 9);
-}
-
-// Light shape check mirroring the backend (e.g. AB123456C).
-function is_valid_nino(value: string): boolean
-{
-	return /^[A-Z]{2}[0-9]{6}[A-D]$/.test(value);
-}
-
 export function SettingsSection()
 {
 	const query_client = useQueryClient();
-	const push = use_notify((state) => state.push);
 	const settings_query = useQuery({ queryKey: ["settings"], queryFn: () => api.get_settings() });
 
 	const [draft, set_draft] = useState<Settings | null>(null);
@@ -95,10 +80,6 @@ export function SettingsSection()
 
 	// About metadata and the lightweight update check.
 	const app_info_query = useQuery({ queryKey: ["app_info"], queryFn: () => api.app_info() });
-	const redirect_uris_query = useQuery({
-		queryKey: ["hmrc_redirect_uris"],
-		queryFn: () => api.hmrc_redirect_uris(),
-	});
 	const [update_check, set_update_check] = useState<UpdateCheck | null>(null);
 	// Guards so the auto-check runs once and auto-update opens the page once.
 	const auto_checked = useRef(false);
@@ -132,34 +113,6 @@ export function SettingsSection()
 			check_mutation.mutate();
 		}
 	}, [draft]);
-
-	// HMRC businesses fetched on demand to populate the Business ID picker.
-	const [businesses, set_businesses] = useState<HmrcBusiness[] | null>(null);
-	const fetch_businesses_mutation = useMutation({
-		mutationFn: () => api.hmrc_list_businesses(),
-		onSuccess: (list) =>
-		{
-			set_businesses(list);
-			// One business: select it outright; several: let the user choose below.
-			if (list.length === 1)
-			{
-				update_hmrc({ business_id: list[0].business_id }, true);
-				push("success", "Found one business — selected it.");
-			}
-			else if (list.length === 0)
-			{
-				push("info", "No businesses found on your HMRC record.");
-			}
-		},
-		onError: (error) => notify_error(error),
-	});
-
-	// A readable label for one business in the picker.
-	const business_label = (business: HmrcBusiness): string =>
-	{
-		const name = business.trading_name || business.type_of_business || "business";
-		return `${name} — ${business.business_id}`;
-	};
 
 	// Persist the given settings, immediately or after the debounce window. On
 	// success the settings cache is updated in place so the app root re-applies
@@ -204,16 +157,6 @@ export function SettingsSection()
 	const update = (patch: Partial<Settings>, immediate: boolean) =>
 	{
 		const next = { ...(draft_ref.current as Settings), ...patch };
-		draft_ref.current = next;
-		set_draft(next);
-		persist(next, immediate);
-	};
-
-	// Apply a patch to the nested HMRC settings and schedule its save.
-	const update_hmrc = (patch: Partial<Settings["hmrc"]>, immediate: boolean) =>
-	{
-		const current = draft_ref.current as Settings;
-		const next = { ...current, hmrc: { ...current.hmrc, ...patch } };
 		draft_ref.current = next;
 		set_draft(next);
 		persist(next, immediate);
@@ -377,149 +320,6 @@ export function SettingsSection()
 
 			<Card>
 				<CardHeader>
-					<CardTitle>HMRC connection</CardTitle>
-				</CardHeader>
-				<CardContent className="flex flex-col gap-4">
-					<div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="environment">Environment</Label>
-							<Select
-								id="environment"
-								title="Use the sandbox for testing, production for real submissions"
-								value={draft.hmrc.environment}
-								onChange={(event) => update_hmrc({ environment: event.target.value }, true)}
-							>
-								{HMRC_ENVIRONMENT_OPTIONS.map((option) => (
-									<option key={option} value={option}>
-										{option}
-									</option>
-								))}
-							</Select>
-						</div>
-						<TextField id="client_id" label="Client ID" value={draft.hmrc.client_id} on_change={(value) => update_hmrc({ client_id: value }, false)} hint="From your HMRC Developer Hub application" />
-						<TextField id="client_secret" label="Client secret" type="password" value={draft.hmrc.client_secret} on_change={(value) => update_hmrc({ client_secret: value }, false)} hint="Stored locally in the settings file" />
-						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="national_insurance_number">National Insurance no.</Label>
-							<Input
-								id="national_insurance_number"
-								title="Your National Insurance number (e.g. AB123456C)"
-								placeholder="AB123456C"
-								value={draft.hmrc.national_insurance_number}
-								onChange={(event) =>
-									update_hmrc({ national_insurance_number: normalize_nino(event.target.value) }, false)
-								}
-							/>
-							{draft.hmrc.national_insurance_number.length > 0 &&
-							!is_valid_nino(draft.hmrc.national_insurance_number) ? (
-								<span className="text-xs text-destructive">
-									Doesn’t look like a NINO yet (expected like AB123456C).
-								</span>
-							) : null}
-						</div>
-						<TextField id="business_id" label="Business ID" value={draft.hmrc.business_id} on_change={(value) => update_hmrc({ business_id: value }, false)} hint="HMRC business ID (e.g. XAIS…), not your UTR. Use Fetch below to look it up." />
-					</div>
-
-					{/* Sandbox only: mock-identity escape hatch + stubbed-response scenario. */}
-					{draft.hmrc.environment === "sandbox" ? (
-						<>
-							<label
-								className="flex items-center gap-2 text-sm"
-								title="Send the Gov-Test-Scenario header on the business lookup so HMRC returns its stubbed/mock test data. Turn off to test against a real identity in the sandbox."
-							>
-								<input
-									type="checkbox"
-									className="h-4 w-4"
-									checked={draft.hmrc.using_mock_identity}
-									onChange={(event) => update_hmrc({ using_mock_identity: event.target.checked }, true)}
-								/>
-								Using mock identity
-							</label>
-
-							{draft.hmrc.using_mock_identity ? (
-								<div className="flex flex-col gap-1.5">
-									<Label htmlFor="gov_test_scenario">Sandbox test scenario (optional)</Label>
-									<Input
-										id="gov_test_scenario"
-										title="Sent as the Gov-Test-Scenario header (on the business lookup) to select a stubbed HMRC sandbox response"
-										placeholder="e.g. a scenario name from HMRC's API docs (BUSINESS_AND_PROPERTY)"
-										value={draft.hmrc.gov_test_scenario}
-										onChange={(event) => update_hmrc({ gov_test_scenario: event.target.value }, false)}
-									/>
-									<span className="text-xs text-muted-foreground">
-										Sent as the Gov-Test-Scenario header on the business lookup so HMRC
-										returns canned data (see the HMRC API docs for scenario names). Not
-										sent on submissions.
-									</span>
-								</div>
-							) : null}
-						</>
-					) : null}
-
-					{/* The loopback redirect URIs to register on the HMRC Developer Hub. */}
-					<div className="rounded-md border border-border bg-muted/40 p-3">
-						<p className="mb-1 text-sm font-medium">
-							Register these redirect URIs with your HMRC application
-						</p>
-						{redirect_uris_query.data && redirect_uris_query.data.length > 0 ? (
-							<ul className="list-disc pl-5 font-mono text-xs text-muted-foreground">
-								{redirect_uris_query.data.map((uri) => (
-									<li key={uri}>{uri}</li>
-								))}
-							</ul>
-						) : (
-							<span className="text-xs text-muted-foreground">…</span>
-						)}
-						<p className="mt-1 text-xs text-muted-foreground">
-							Authorise uses whichever of these ports is free at the time, so register all of them.
-						</p>
-					</div>
-
-					{/* Look up the Business ID from HMRC instead of typing it. */}
-					<div className="flex flex-col gap-2">
-						<div className="flex flex-wrap items-center gap-2">
-							<Button
-								variant="outline"
-								title="Fetch the businesses on your HMRC record (requires authorisation)"
-								disabled={fetch_businesses_mutation.isPending}
-								onClick={() => fetch_businesses_mutation.mutate()}
-							>
-								<Icon name="cloud_download" /> Fetch my businesses
-							</Button>
-							{fetch_businesses_mutation.isPending ? <Spinner label="Fetching…" /> : null}
-						</div>
-
-						{businesses && businesses.length > 1 ? (
-							<div className="flex flex-col gap-1.5">
-								<Label htmlFor="business_picker">Select your business</Label>
-								<Select
-									id="business_picker"
-									title="Choose which business to use as the Business ID"
-									value={draft.hmrc.business_id}
-									onChange={(event) => update_hmrc({ business_id: event.target.value }, true)}
-								>
-									<option value="" disabled>
-										Choose…
-									</option>
-									{businesses.map((business) => (
-										<option key={business.business_id} value={business.business_id}>
-											{business_label(business)}
-										</option>
-									))}
-								</Select>
-							</div>
-						) : null}
-
-						{businesses && businesses.length === 0 ? (
-							<p className="text-sm text-muted-foreground">
-								No businesses found on your HMRC record.
-							</p>
-						) : null}
-					</div>
-				</CardContent>
-			</Card>
-
-			<Card>
-				<CardHeader>
 					<CardTitle>Updates</CardTitle>
 				</CardHeader>
 				<CardContent className="flex flex-col gap-4">
@@ -658,30 +458,6 @@ function NumberField(props: {
 				title={props.hint}
 				value={props.value}
 				onChange={(event) => props.on_change(Math.max(0, Math.floor(Number(event.target.value) || 0)))}
-			/>
-		</div>
-	);
-}
-
-// A labelled text/password input.
-function TextField(props: {
-	id: string;
-	label: string;
-	value: string;
-	on_change: (value: string) => void;
-	hint?: string;
-	type?: string;
-})
-{
-	return (
-		<div className="flex flex-col gap-1.5">
-			<Label htmlFor={props.id}>{props.label}</Label>
-			<Input
-				id={props.id}
-				type={props.type ?? "text"}
-				title={props.hint}
-				value={props.value}
-				onChange={(event) => props.on_change(event.target.value)}
 			/>
 		</div>
 	);

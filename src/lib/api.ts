@@ -22,6 +22,7 @@ import type {
 	NewLedgerEvent,
 	Settings,
 	Subcategory,
+	TestDataSetup,
 	UpdateCheck,
 } from "@/lib/types";
 
@@ -92,4 +93,30 @@ export const api = {
 	// supplied; the backend derives the tax year and the 6 April start date.
 	hmrc_submit_period: (period_end: string) =>
 		invoke<HmrcSubmission>("hmrc_submit_period", { period_end }),
+
+	// ---- HMRC Get (read-only, live state from HMRC) ----
+	// Each returns the raw {status, body} so the UI can show HMRC's response (and
+	// HTTP status) directly, including 404s for APIs the app is not subscribed to.
+	hmrc_get_business_details: () => invoke<HmrcApiResult>("hmrc_get_business_details"),
+	hmrc_get_obligations_quarterly: () => invoke<HmrcApiResult>("hmrc_get_obligations_quarterly"),
+	hmrc_get_obligations_final_declaration: (tax_year: string) =>
+		invoke<HmrcApiResult>("hmrc_get_obligations_final_declaration", { tax_year }),
+	hmrc_get_cumulative: (tax_year: string) =>
+		invoke<HmrcApiResult>("hmrc_get_cumulative", { tax_year }),
+	hmrc_get_annual: (tax_year: string) => invoke<HmrcApiResult>("hmrc_get_annual", { tax_year }),
+	hmrc_get_period_summaries: (tax_year: string) =>
+		invoke<HmrcApiResult>("hmrc_get_period_summaries", { tax_year }),
+
+	// Phase 2: optional APIs needing their own Developer Hub subscription (404 until
+	// subscribed).
+	hmrc_get_biss: (tax_year: string) => invoke<HmrcApiResult>("hmrc_get_biss", { tax_year }),
+	hmrc_get_calculations: (tax_year: string) =>
+		invoke<HmrcApiResult>("hmrc_get_calculations", { tax_year }),
+	hmrc_get_sa_account: () => invoke<HmrcApiResult>("hmrc_get_sa_account"),
+
+	// Sandbox-only: idempotently seed a stateful test business + ITSA status.
+	hmrc_setup_test_data: (tax_year: string) =>
+		invoke<TestDataSetup>("hmrc_setup_test_data", { tax_year }),
+	// When the sandbox test data was last seeded (RFC3339), or null.
+	hmrc_test_data_seeded_at: () => invoke<string | null>("hmrc_test_data_seeded_at"),
 };
