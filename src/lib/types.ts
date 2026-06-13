@@ -112,9 +112,11 @@ export interface LastUsedSubcategories
 	expense: number | null;
 }
 
+// The Sandbox/Production run mode (mirrors the Rust RunMode enum).
+export type RunMode = "sandbox" | "production";
+
 export interface HmrcSettings
 {
-	environment: string;
 	client_id: string;
 	client_secret: string;
 	oauth_redirect_ports: number[];
@@ -139,7 +141,8 @@ export interface Settings
 	mcp_server_port: number;
 	auto_check_for_updates: boolean;
 	auto_update: boolean;
-	hmrc: HmrcSettings;
+	hmrc_sandbox: HmrcSettings;
+	hmrc_production: HmrcSettings;
 }
 
 export interface AppInfo

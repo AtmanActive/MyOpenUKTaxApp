@@ -131,4 +131,17 @@
 		line-height: 1;
 		user-select: none;
 	}
+
+	/*
+	 * Run-mode visibility. The app root carries `.mode-sandbox` or
+	 * `.mode-production`. Elements tagged `runmode_sandbox` / `runmode_production`
+	 * are hidden in the other mode; `runmode_universal` (and anything untagged) is
+	 * always shown. Toggling the root class re-skins the whole app — no restart.
+	 */
+	.mode-production .runmode_sandbox {
+		display: none !important;
+	}
+	.mode-sandbox .runmode_production {
+		display: none !important;
+	}
 }

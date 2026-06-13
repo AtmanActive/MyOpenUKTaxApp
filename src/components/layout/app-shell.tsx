@@ -64,8 +64,27 @@ export function AppShell()
 		}
 	}, [status_query.data, hmrc_connection, set_hmrc_connection]);
 
+	// Seed the run mode from the backend on launch; the topbar toggle drives it
+	// thereafter. The `mode-*` root class powers the runmode_* visibility CSS.
+	const run_mode = use_app_store((state) => state.run_mode);
+	const set_run_mode = use_app_store((state) => state.set_run_mode);
+	const run_mode_query = useQuery({ queryKey: ["run_mode"], queryFn: () => api.get_run_mode() });
+	useEffect(() =>
+	{
+		if (run_mode_query.data)
+		{
+			set_run_mode(run_mode_query.data);
+		}
+	}, [run_mode_query.data, set_run_mode]);
+
 	return (
-		<div className={cn("flex h-full w-full overflow-hidden", is_portrait ? "flex-col" : "flex-row")}>
+		<div
+			className={cn(
+				"flex h-full w-full overflow-hidden",
+				`mode-${run_mode}`,
+				is_portrait ? "flex-col" : "flex-row",
+			)}
+		>
 			{!is_portrait ? <Sidebar orientation="vertical" /> : null}
 
 			<div className="flex min-w-0 flex-1 flex-col">

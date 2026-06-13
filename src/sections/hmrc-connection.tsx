@@ -19,7 +19,7 @@ import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
 import { format_datetime } from "@/lib/format";
-import { HMRC_ENVIRONMENT_OPTIONS, type HmrcBusiness, type Settings } from "@/lib/types";
+import type { HmrcBusiness, Settings } from "@/lib/types";
 import { use_app_store } from "@/store/app-store";
 import { notify_error, use_notify } from "@/store/notify";
 
@@ -65,6 +65,11 @@ export function HmrcConnectionSection()
 	const push = use_notify((state) => state.push);
 	const query_client = useQueryClient();
 	const set_hmrc_connection = use_app_store((state) => state.set_hmrc_connection);
+	const run_mode = use_app_store((state) => state.run_mode);
+
+	// Credentials are per-mode: the screen edits the active mode's HMRC block.
+	const mode_key: "hmrc_sandbox" | "hmrc_production" =
+		run_mode === "production" ? "hmrc_production" : "hmrc_sandbox";
 
 	const settings_query = useQuery({ queryKey: ["settings"], queryFn: () => api.get_settings() });
 	const status_query = useQuery({ queryKey: ["hmrc_status"], queryFn: () => api.hmrc_status() });
@@ -131,10 +136,10 @@ export function HmrcConnectionSection()
 		}
 	};
 
-	const update_hmrc = (patch: Partial<Settings["hmrc"]>, immediate: boolean) =>
+	const update_hmrc = (patch: Partial<Settings["hmrc_sandbox"]>, immediate: boolean) =>
 	{
 		const current = draft_ref.current as Settings;
-		const next = { ...current, hmrc: { ...current.hmrc, ...patch } };
+		const next = { ...current, [mode_key]: { ...current[mode_key], ...patch } };
 		draft_ref.current = next;
 		set_draft(next);
 		persist(next, immediate);
@@ -266,11 +271,23 @@ export function HmrcConnectionSection()
 	}
 
 	const status = status_query.data;
-	const is_sandbox = draft.hmrc.environment === "sandbox";
+	// The active mode's HMRC settings block, read by the credential fields below.
+	const hmrc = draft[mode_key];
 
 	return (
 		<div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
 			<SaveIndicator status={save_status} />
+
+			{/* Production-only warning, shown via the runmode_production class. */}
+			<div className="runmode_production flex flex-col gap-1 rounded-md border border-red-700 bg-red-950/40 p-3 text-red-200">
+				<span className="flex items-center gap-2 text-sm font-medium">
+					<Icon name="warning" className="text-base" /> Production mode
+				</span>
+				<span className="text-xs">
+					You are connected to live HMRC. Credentials and submissions here affect your real
+					tax record.
+				</span>
+			</div>
 
 			{/* Credentials. */}
 			<Card>
@@ -280,77 +297,67 @@ export function HmrcConnectionSection()
 				<CardContent className="flex flex-col gap-4">
 					<div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
 						<div className="flex flex-col gap-1.5">
-							<Label htmlFor="environment">Environment</Label>
-							<Select
-								id="environment"
-								title="Use the sandbox for testing, production for real submissions"
-								value={draft.hmrc.environment}
-								onChange={(event) => update_hmrc({ environment: event.target.value }, true)}
-							>
-								{HMRC_ENVIRONMENT_OPTIONS.map((option) => (
-									<option key={option} value={option}>
-										{option}
-									</option>
-								))}
-							</Select>
+							<Label>Environment</Label>
+							<div className="flex h-9 items-center rounded-md border border-input bg-muted px-3 text-sm capitalize text-muted-foreground">
+								{run_mode} — switch in the top bar
+							</div>
 						</div>
-						<TextField id="client_id" label="Client ID" value={draft.hmrc.client_id} on_change={(value) => update_hmrc({ client_id: value }, false)} hint="From your HMRC Developer Hub application" />
-						<TextField id="client_secret" label="Client secret" type="password" value={draft.hmrc.client_secret} on_change={(value) => update_hmrc({ client_secret: value }, false)} hint="Stored locally in the settings file" />
+						<TextField id="client_id" label="Client ID" value={hmrc.client_id} on_change={(value) => update_hmrc({ client_id: value }, false)} hint="From your HMRC Developer Hub application" />
+						<TextField id="client_secret" label="Client secret" type="password" value={hmrc.client_secret} on_change={(value) => update_hmrc({ client_secret: value }, false)} hint="Stored locally in the settings file" />
 						<div className="flex flex-col gap-1.5">
 							<Label htmlFor="national_insurance_number">National Insurance no.</Label>
 							<Input
 								id="national_insurance_number"
 								title="Your National Insurance number (e.g. AB123456C)"
 								placeholder="AB123456C"
-								value={draft.hmrc.national_insurance_number}
+								value={hmrc.national_insurance_number}
 								onChange={(event) =>
 									update_hmrc({ national_insurance_number: normalize_nino(event.target.value) }, false)
 								}
 							/>
-							{draft.hmrc.national_insurance_number.length > 0 &&
-							!is_valid_nino(draft.hmrc.national_insurance_number) ? (
+							{hmrc.national_insurance_number.length > 0 &&
+							!is_valid_nino(hmrc.national_insurance_number) ? (
 								<span className="text-xs text-destructive">
 									Doesn’t look like a NINO yet (expected like AB123456C).
 								</span>
 							) : null}
 						</div>
-						<TextField id="business_id" label="Business ID" value={draft.hmrc.business_id} on_change={(value) => update_hmrc({ business_id: value }, false)} hint="HMRC business ID (e.g. XAIS…), not your UTR. Use Fetch below to look it up." />
+						<TextField id="business_id" label="Business ID" value={hmrc.business_id} on_change={(value) => update_hmrc({ business_id: value }, false)} hint="HMRC business ID (e.g. XAIS…), not your UTR. Use Fetch below to look it up." />
 					</div>
 
-					{is_sandbox ? (
-						<>
-							<label
-								className="flex items-center gap-2 text-sm"
-								title="Send the Gov-Test-Scenario header so HMRC returns its stubbed/stateful test data. Turn off to test against a real identity in the sandbox."
-							>
-								<input
-									type="checkbox"
-									className="h-4 w-4"
-									checked={draft.hmrc.using_mock_identity}
-									onChange={(event) => update_hmrc({ using_mock_identity: event.target.checked }, true)}
-								/>
-								Using mock identity
-							</label>
+					{/* Sandbox-only: hidden in production via the runmode_sandbox class. */}
+					<div className="runmode_sandbox flex flex-col gap-4">
+						<label
+							className="flex items-center gap-2 text-sm"
+							title="Send the Gov-Test-Scenario header so HMRC returns its stubbed/stateful test data. Turn off to test against a real identity in the sandbox."
+						>
+							<input
+								type="checkbox"
+								className="h-4 w-4"
+								checked={hmrc.using_mock_identity}
+								onChange={(event) => update_hmrc({ using_mock_identity: event.target.checked }, true)}
+							/>
+							Using mock identity
+						</label>
 
-							{draft.hmrc.using_mock_identity ? (
-								<div className="flex flex-col gap-1.5">
-									<Label htmlFor="gov_test_scenario">Sandbox test scenario</Label>
-									<Input
-										id="gov_test_scenario"
-										title="Sent as the Gov-Test-Scenario header on every sandbox API call"
-										placeholder="e.g. STATEFUL"
-										value={draft.hmrc.gov_test_scenario}
-										onChange={(event) => update_hmrc({ gov_test_scenario: event.target.value }, false)}
-									/>
-									<span className="text-xs text-muted-foreground">
-										Sent as the Gov-Test-Scenario header on every sandbox call. Use
-										<span className="font-mono"> STATEFUL </span>
-										so submissions read back and obligations generate.
-									</span>
-								</div>
-							) : null}
-						</>
-					) : null}
+						{hmrc.using_mock_identity ? (
+							<div className="flex flex-col gap-1.5">
+								<Label htmlFor="gov_test_scenario">Sandbox test scenario</Label>
+								<Input
+									id="gov_test_scenario"
+									title="Sent as the Gov-Test-Scenario header on every sandbox API call"
+									placeholder="e.g. STATEFUL"
+									value={hmrc.gov_test_scenario}
+									onChange={(event) => update_hmrc({ gov_test_scenario: event.target.value }, false)}
+								/>
+								<span className="text-xs text-muted-foreground">
+									Sent as the Gov-Test-Scenario header on every sandbox call. Use
+									<span className="font-mono"> STATEFUL </span>
+									so submissions read back and obligations generate.
+								</span>
+							</div>
+						) : null}
+					</div>
 
 					<div className="rounded-md border border-border bg-muted/40 p-3">
 						<p className="mb-1 text-sm font-medium">
@@ -389,7 +396,7 @@ export function HmrcConnectionSection()
 								<Select
 									id="business_picker"
 									title="Choose which business to use as the Business ID"
-									value={draft.hmrc.business_id}
+									value={hmrc.business_id}
 									onChange={(event) => update_hmrc({ business_id: event.target.value }, true)}
 								>
 									<option value="" disabled>
@@ -466,9 +473,8 @@ export function HmrcConnectionSection()
 				</CardContent>
 			</Card>
 
-			{/* Sandbox-only stateful test-data seeding. */}
-			{is_sandbox ? (
-				<Card>
+			{/* Sandbox-only stateful test-data seeding (hidden in production via CSS). */}
+			<Card className="runmode_sandbox">
 					<CardHeader>
 						<CardTitle>Sandbox test data</CardTitle>
 					</CardHeader>
@@ -516,7 +522,6 @@ export function HmrcConnectionSection()
 						) : null}
 					</CardContent>
 				</Card>
-			) : null}
 		</div>
 	);
 }

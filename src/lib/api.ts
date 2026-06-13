@@ -20,6 +20,7 @@ import type {
 	LedgerEvent,
 	NewCategoryMapping,
 	NewLedgerEvent,
+	RunMode,
 	Settings,
 	Subcategory,
 	TestDataSetup,
@@ -119,4 +120,8 @@ export const api = {
 		invoke<TestDataSetup>("hmrc_setup_test_data", { tax_year }),
 	// When the sandbox test data was last seeded (RFC3339), or null.
 	hmrc_test_data_seeded_at: () => invoke<string | null>("hmrc_test_data_seeded_at"),
+
+	// ---- Run mode (Sandbox / Production) ----
+	get_run_mode: () => invoke<RunMode>("get_run_mode"),
+	set_run_mode: (mode: RunMode) => invoke<RunMode>("set_run_mode", { mode }),
 };

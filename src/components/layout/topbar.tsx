@@ -7,11 +7,15 @@
 // obvious: a flashing filter icon, a clear (✕) control, a dark-red background
 // and a " (filtered)" suffix on the title.
 
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import { Input } from "@/components/ui/input";
+import { api } from "@/lib/api";
+import type { RunMode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { SECTIONS, use_app_store } from "@/store/app-store";
+import { notify_error } from "@/store/notify";
 
 export function Topbar()
 {
@@ -51,6 +55,8 @@ export function Topbar()
 			</div>
 
 			<div className="flex flex-1 flex-wrap items-center justify-end gap-2">
+				<RunModeToggle />
+
 				{show_search ? (
 					<div className="flex items-center gap-2">
 						{/* Flashing indicator that a filter is currently applied. */}
@@ -122,5 +128,56 @@ export function Topbar()
 				) : null}
 			</div>
 		</header>
+	);
+}
+
+// A Sandbox/Production segmented toggle. Switching is live: it calls the backend
+// (which flips the DB schema + HMRC credentials), updates the root mode class, and
+// invalidates every query so all screens reload from the newly-active schema.
+function RunModeToggle()
+{
+	const run_mode = use_app_store((state) => state.run_mode);
+	const set_run_mode = use_app_store((state) => state.set_run_mode);
+	const set_hmrc_connection = use_app_store((state) => state.set_hmrc_connection);
+	const query_client = useQueryClient();
+
+	const switch_mutation = useMutation({
+		mutationFn: (mode: RunMode) => api.set_run_mode(mode),
+		onSuccess: (mode) =>
+		{
+			set_run_mode(mode);
+			// The new mode has its own token/credentials; re-seed the LED and reload
+			// every screen's data from the now-active schema.
+			set_hmrc_connection("unknown");
+			void query_client.invalidateQueries();
+		},
+		onError: (error) => notify_error(error),
+	});
+
+	const modes: RunMode[] = ["sandbox", "production"];
+	return (
+		<div
+			className="flex items-center gap-0.5 rounded-md border border-border p-0.5"
+			title="Switch between Sandbox and Production. Each mode has its own data and HMRC credentials."
+		>
+			{modes.map((mode) => (
+				<button
+					key={mode}
+					type="button"
+					disabled={switch_mutation.isPending}
+					onClick={() => mode !== run_mode && switch_mutation.mutate(mode)}
+					className={cn(
+						"rounded px-2 py-0.5 text-xs font-medium capitalize transition-colors",
+						run_mode === mode
+							? mode === "production"
+								? "bg-red-700 text-white"
+								: "bg-primary text-primary-foreground"
+							: "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+					)}
+				>
+					{mode}
+				</button>
+			))}
+		</div>
 	);
 }

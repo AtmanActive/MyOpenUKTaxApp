@@ -13,6 +13,7 @@ mod housekeeping;
 mod logging;
 mod mcp;
 mod paths;
+mod runmode;
 mod settings;
 mod state;
 mod util;
@@ -113,6 +114,8 @@ pub fn run()
 			commands::settings_cmds::open_logs_directory,
 			commands::app_cmds::app_info,
 			commands::app_cmds::check_latest_version,
+			commands::mode_cmds::get_run_mode,
+			commands::mode_cmds::set_run_mode,
 			commands::hmrc_cmds::list_hmrc_categories,
 			commands::hmrc_cmds::list_hmrc_submissions,
 			commands::hmrc_cmds::hmrc_list_businesses,
@@ -162,11 +165,15 @@ fn initialize() -> AppResult<AppState>
 	logging::remove_empty_logs(&paths)?;
 	let logger = Arc::new(Logger::new(&paths)?);
 
-	// Open and migrate the database with the configured backup/retention tuning.
+	// Load the run mode (Sandbox/Production) so the DB opens on the right schema.
+	let run_mode = runmode::load(&paths);
+
+	// Open and migrate the database (both schemas) with the configured tuning.
 	let database = Database::open(
 		&paths,
 		settings.backup_min_interval_seconds,
 		settings.backups_pruned_after_days,
+		run_mode.schema(),
 	)?;
 
 	// Load any saved window geometry/mode before paths is moved into the state.
@@ -177,6 +184,7 @@ fn initialize() -> AppResult<AppState>
 		settings: Mutex::new(settings),
 		logger,
 		database: Arc::new(Mutex::new(database)),
+		run_mode: Mutex::new(run_mode),
 		window_state: Mutex::new(window_state),
 		window_baseline: Mutex::new(None),
 		window_save_generation: std::sync::atomic::AtomicU64::new(0),

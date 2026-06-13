@@ -62,15 +62,17 @@ pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<H
 {
 	state.logger.action("HMRC list businesses");
 
-	let (environment, access_token, raw_nino, device_id, using_mock_identity, gov_test_scenario) = {
+	let mode = state.current_run_mode()?;
+	let environment = mode.hmrc_environment().to_string();
+	let (access_token, raw_nino, device_id, using_mock_identity, gov_test_scenario) = {
 		let settings = state.lock_settings()?;
+		let hmrc = settings.hmrc(mode);
 		(
-			settings.hmrc.environment.clone(),
-			settings.hmrc.access_token.clone(),
-			settings.hmrc.national_insurance_number.clone(),
+			hmrc.access_token.clone(),
+			hmrc.national_insurance_number.clone(),
 			settings.device_id.clone(),
-			settings.hmrc.using_mock_identity,
-			settings.hmrc.gov_test_scenario.clone(),
+			hmrc.using_mock_identity,
+			hmrc.gov_test_scenario.clone(),
 		)
 	};
 
@@ -152,8 +154,9 @@ pub async fn hmrc_list_businesses(state: State<'_, AppState>) -> AppResult<Vec<H
 pub fn hmrc_set_business_id(state: State<'_, AppState>, business_id: String) -> AppResult<()>
 {
 	state.logger.action("HMRC set business id");
+	let mode = state.current_run_mode()?;
 	let mut settings = state.lock_settings()?;
-	settings.hmrc.business_id = business_id;
+	settings.hmrc_mut(mode).business_id = business_id;
 	settings.save(&state.paths)?;
 	Ok(())
 }
@@ -223,9 +226,10 @@ pub fn hmrc_status(state: State<'_, AppState>) -> AppResult<HmrcStatus>
 #[tauri::command(rename_all = "snake_case")]
 pub fn hmrc_redirect_uris(state: State<'_, AppState>) -> AppResult<Vec<String>>
 {
+	let mode = state.current_run_mode()?;
 	let settings = state.lock_settings()?;
 	Ok(settings
-		.hmrc
+		.hmrc(mode)
 		.oauth_redirect_ports
 		.iter()
 		.map(|port| redirect_uri_for_port(*port))
@@ -241,13 +245,15 @@ pub async fn hmrc_authorize(app: AppHandle, state: State<'_, AppState>) -> AppRe
 {
 	state.logger.action("HMRC authorise (automatic)");
 
-	let (environment, client_id, client_secret, ports) = {
+	let mode = state.current_run_mode()?;
+	let environment = mode.hmrc_environment().to_string();
+	let (client_id, client_secret, ports) = {
 		let settings = state.lock_settings()?;
+		let hmrc = settings.hmrc(mode);
 		(
-			settings.hmrc.environment.clone(),
-			settings.hmrc.client_id.clone(),
-			settings.hmrc.client_secret.clone(),
-			settings.hmrc.oauth_redirect_ports.clone(),
+			hmrc.client_id.clone(),
+			hmrc.client_secret.clone(),
+			hmrc.oauth_redirect_ports.clone(),
 		)
 	};
 
@@ -456,12 +462,10 @@ pub async fn hmrc_hello_world(state: State<'_, AppState>) -> AppResult<HmrcApiRe
 	state.logger.action("HMRC connectivity test");
 
 	// Snapshot the values we need, then drop the guard before awaiting.
-	let (environment, device_id) = {
-		let settings = state.lock_settings()?;
-		(settings.hmrc.environment.clone(), settings.device_id.clone())
-	};
+	let mode = state.current_run_mode()?;
+	let device_id = state.lock_settings()?.device_id.clone();
 
-	let client = HmrcClient::new(&environment, state.logger.clone(), None);
+	let client = HmrcClient::new(mode.hmrc_environment(), state.logger.clone(), None);
 	client.hello_world(&device_id).await
 }
 
@@ -471,14 +475,11 @@ pub async fn hmrc_refresh_token(state: State<'_, AppState>) -> AppResult<HmrcSta
 {
 	state.logger.action("HMRC refresh token");
 
-	let (environment, client_id, client_secret, refresh_token) = {
+	let mode = state.current_run_mode()?;
+	let (client_id, client_secret, refresh_token) = {
 		let settings = state.lock_settings()?;
-		(
-			settings.hmrc.environment.clone(),
-			settings.hmrc.client_id.clone(),
-			settings.hmrc.client_secret.clone(),
-			settings.hmrc.refresh_token.clone(),
-		)
+		let hmrc = settings.hmrc(mode);
+		(hmrc.client_id.clone(), hmrc.client_secret.clone(), hmrc.refresh_token.clone())
 	};
 
 	if refresh_token.is_empty()
@@ -488,7 +489,7 @@ pub async fn hmrc_refresh_token(state: State<'_, AppState>) -> AppResult<HmrcSta
 		));
 	}
 
-	let client = HmrcClient::new(&environment, state.logger.clone(), None);
+	let client = HmrcClient::new(mode.hmrc_environment(), state.logger.clone(), None);
 	let token = client
 		.refresh_access_token(&client_id, &client_secret, &refresh_token)
 		.await?;
@@ -516,16 +517,18 @@ pub async fn hmrc_submit_period(
 		.action(&format!("HMRC submit cumulative {tax_year} ({period_start}..{period_end})"));
 
 	// Snapshot the HMRC config we need for the call.
-	let (environment, access_token, nino, business_id, device_id, using_mock_identity, gov_test_scenario) = {
+	let mode = state.current_run_mode()?;
+	let environment = mode.hmrc_environment().to_string();
+	let (access_token, nino, business_id, device_id, using_mock_identity, gov_test_scenario) = {
 		let settings = state.lock_settings()?;
+		let hmrc = settings.hmrc(mode);
 		(
-			settings.hmrc.environment.clone(),
-			settings.hmrc.access_token.clone(),
-			settings.hmrc.national_insurance_number.clone(),
-			settings.hmrc.business_id.clone(),
+			hmrc.access_token.clone(),
+			hmrc.national_insurance_number.clone(),
+			hmrc.business_id.clone(),
 			settings.device_id.clone(),
-			settings.hmrc.using_mock_identity,
-			settings.hmrc.gov_test_scenario.clone(),
+			hmrc.using_mock_identity,
+			hmrc.gov_test_scenario.clone(),
 		)
 	};
 
@@ -683,32 +686,37 @@ fn build_cumulative_body(
 	serde_json::Value::Object(body)
 }
 
-// Persist freshly obtained tokens and compute the absolute expiry instant.
+// Persist freshly obtained tokens (into the active mode's block) and compute the
+// absolute expiry instant.
 fn store_tokens(state: &State<'_, AppState>, token: TokenResponse) -> AppResult<()>
 {
+	let mode = state.current_run_mode()?;
 	let mut settings = state.lock_settings()?;
-	settings.hmrc.access_token = token.access_token;
+	let hmrc = settings.hmrc_mut(mode);
+	hmrc.access_token = token.access_token;
 	// A refresh response may omit a new refresh token; keep the existing one then.
 	if !token.refresh_token.is_empty()
 	{
-		settings.hmrc.refresh_token = token.refresh_token;
+		hmrc.refresh_token = token.refresh_token;
 	}
-	settings.hmrc.token_expires_at_epoch_seconds = Utc::now().timestamp() + token.expires_in;
+	hmrc.token_expires_at_epoch_seconds = Utc::now().timestamp() + token.expires_in;
 	settings.save(&state.paths)?;
 	Ok(())
 }
 
-// Read the current connection status out of settings.
+// Read the current connection status (for the active mode) out of settings.
 fn current_status(state: &State<'_, AppState>) -> AppResult<HmrcStatus>
 {
+	let mode = state.current_run_mode()?;
 	let settings = state.lock_settings()?;
+	let hmrc = settings.hmrc(mode);
 	Ok(HmrcStatus {
-		configured: !settings.hmrc.client_id.is_empty(),
-		business_configured: !settings.hmrc.national_insurance_number.is_empty()
-			&& !settings.hmrc.business_id.is_empty(),
-		has_token: !settings.hmrc.access_token.is_empty(),
-		environment: settings.hmrc.environment.clone(),
-		token_expires_at_epoch_seconds: settings.hmrc.token_expires_at_epoch_seconds,
+		configured: !hmrc.client_id.is_empty(),
+		business_configured: !hmrc.national_insurance_number.is_empty()
+			&& !hmrc.business_id.is_empty(),
+		has_token: !hmrc.access_token.is_empty(),
+		environment: mode.hmrc_environment().to_string(),
+		token_expires_at_epoch_seconds: hmrc.token_expires_at_epoch_seconds,
 	})
 }
 
@@ -749,16 +757,18 @@ struct HmrcReadContext
 // configured Business ID for the per-business endpoints.
 fn hmrc_read_context(state: &State<'_, AppState>, require_business: bool) -> AppResult<HmrcReadContext>
 {
-	let (environment, access_token, raw_nino, business_id, device_id, using_mock_identity, gov_test_scenario) = {
+	let mode = state.current_run_mode()?;
+	let environment = mode.hmrc_environment().to_string();
+	let (access_token, raw_nino, business_id, device_id, using_mock_identity, gov_test_scenario) = {
 		let settings = state.lock_settings()?;
+		let hmrc = settings.hmrc(mode);
 		(
-			settings.hmrc.environment.clone(),
-			settings.hmrc.access_token.clone(),
-			settings.hmrc.national_insurance_number.clone(),
-			settings.hmrc.business_id.clone(),
+			hmrc.access_token.clone(),
+			hmrc.national_insurance_number.clone(),
+			hmrc.business_id.clone(),
 			settings.device_id.clone(),
-			settings.hmrc.using_mock_identity,
-			settings.hmrc.gov_test_scenario.clone(),
+			hmrc.using_mock_identity,
+			hmrc.gov_test_scenario.clone(),
 		)
 	};
 
@@ -1001,10 +1011,11 @@ pub async fn hmrc_setup_test_data(state: State<'_, AppState>, tax_year: String) 
 		(id, true)
 	};
 
-	// Persist the business id (short-lived lock, no await held).
+	// Persist the business id into the active mode's block (short-lived lock).
 	{
+		let mode = state.current_run_mode()?;
 		let mut settings = state.lock_settings()?;
-		settings.hmrc.business_id = business_id.clone();
+		settings.hmrc_mut(mode).business_id = business_id.clone();
 		settings.save(&state.paths)?;
 	}
 

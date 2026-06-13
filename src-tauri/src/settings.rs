@@ -9,6 +9,7 @@
 use crate::error::AppError;
 use crate::error::AppResult;
 use crate::paths::AppPaths;
+use crate::runmode::RunMode;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -25,7 +26,6 @@ pub const ALLOWED_FONT_SIZES: [&str; 9] = [
 	"xx-large",
 	"xxx-large",
 ];
-pub const ALLOWED_HMRC_ENVIRONMENTS: [&str; 2] = ["sandbox", "production"];
 
 // Default retention windows come straight from the overview document.
 fn default_backups_pruned_after_days() -> u32
@@ -75,11 +75,6 @@ fn default_auto_update() -> bool
 	false
 }
 
-fn default_hmrc_environment() -> String
-{
-	"sandbox".to_string()
-}
-
 // Sandbox users almost always start against HMRC's mock test data, so default the
 // escape hatch on; turning it off targets a real sandbox identity.
 fn default_using_mock_identity() -> bool
@@ -101,19 +96,13 @@ fn default_oauth_redirect_ports() -> Vec<u16>
 	vec![8350, 8351, 8352, 8353, 8354]
 }
 
-// HMRC Making-Tax-Digital connection settings. Credentials are supplied by the
-// user after registering an application on the HMRC Developer Hub; they are
-// never hardcoded in the source.
-//
-// Default is implemented by hand (not derived) because a derived Default would
-// give `environment` an empty string, which fails settings validation on the
-// very first run; the serde field defaults only apply during deserialization.
+// HMRC Making-Tax-Digital connection settings for one run mode. There is one of
+// these per mode (sandbox / production) — the environment is no longer stored
+// here; it is derived from the active run mode. Credentials are supplied by the
+// user after registering an application on the HMRC Developer Hub.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HmrcSettings
 {
-	#[serde(default = "default_hmrc_environment")]
-	pub environment: String,
-
 	#[serde(default)]
 	pub client_id: String,
 
@@ -156,14 +145,13 @@ pub struct HmrcSettings
 	pub gov_test_scenario: String,
 }
 
-// Sensible first-run defaults: sandbox environment and the default redirect URI,
-// everything else empty until the user fills it in on the Settings screen.
+// First-run defaults: the default redirect ports + sandbox testing aids on,
+// everything else empty until the user fills it in.
 impl Default for HmrcSettings
 {
 	fn default() -> Self
 	{
 		Self {
-			environment: default_hmrc_environment(),
 			client_id: String::new(),
 			client_secret: String::new(),
 			oauth_redirect_ports: default_oauth_redirect_ports(),
@@ -213,8 +201,13 @@ pub struct Settings
 	#[serde(default = "default_auto_update")]
 	pub auto_update: bool,
 
+	// Parallel HMRC settings per run mode. `alias = "hmrc"` migrates an older
+	// single-block settings file into the sandbox slot on first load.
+	#[serde(default, alias = "hmrc")]
+	pub hmrc_sandbox: HmrcSettings,
+
 	#[serde(default)]
-	pub hmrc: HmrcSettings,
+	pub hmrc_production: HmrcSettings,
 }
 
 // The all-defaults settings used for a brand-new installation.
@@ -233,7 +226,8 @@ impl Default for Settings
 			mcp_server_port: default_mcp_server_port(),
 			auto_check_for_updates: default_auto_check_for_updates(),
 			auto_update: default_auto_update(),
-			hmrc: HmrcSettings::default(),
+			hmrc_sandbox: HmrcSettings::default(),
+			hmrc_production: HmrcSettings::default(),
 		}
 	}
 }
@@ -294,14 +288,26 @@ impl Settings
 			)));
 		}
 
-		if !ALLOWED_HMRC_ENVIRONMENTS.contains(&self.hmrc.environment.as_str())
-		{
-			return Err(AppError::Validation(format!(
-				"HMRC environment '{}' is not one of {:?}",
-				self.hmrc.environment, ALLOWED_HMRC_ENVIRONMENTS
-			)));
-		}
-
 		Ok(())
+	}
+
+	// The HMRC settings block for a run mode.
+	pub fn hmrc(&self, mode: RunMode) -> &HmrcSettings
+	{
+		match mode
+		{
+			RunMode::Sandbox => &self.hmrc_sandbox,
+			RunMode::Production => &self.hmrc_production,
+		}
+	}
+
+	// The mutable HMRC settings block for a run mode.
+	pub fn hmrc_mut(&mut self, mode: RunMode) -> &mut HmrcSettings
+	{
+		match mode
+		{
+			RunMode::Sandbox => &mut self.hmrc_sandbox,
+			RunMode::Production => &mut self.hmrc_production,
+		}
 	}
 }

@@ -9,5 +9,6 @@ pub mod dashboard;
 pub mod events;
 pub mod hmrc_cmds;
 pub mod mappings;
+pub mod mode_cmds;
 pub mod settings_cmds;
 pub mod subcategories;

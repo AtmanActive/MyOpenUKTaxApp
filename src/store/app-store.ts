@@ -4,7 +4,7 @@
 // sidebar, topbar and sections can share it without prop drilling.
 
 import { create } from "zustand";
-import type { LedgerEvent } from "@/lib/types";
+import type { LedgerEvent, RunMode } from "@/lib/types";
 
 export type SectionId =
 	| "dashboard"
@@ -70,6 +70,11 @@ interface AppUiState
 	// the status query. Shown as a coloured dot in the sidebar.
 	hmrc_connection: HmrcConnection;
 	set_hmrc_connection: (state: HmrcConnection) => void;
+
+	// The active run mode (Sandbox / Production). Mirrors the backend; drives the
+	// root mode class and the runmode_* visibility. Seeded from get_run_mode.
+	run_mode: RunMode;
+	set_run_mode: (mode: RunMode) => void;
 }
 
 export const use_app_store = create<AppUiState>((set) => ({
@@ -92,4 +97,7 @@ export const use_app_store = create<AppUiState>((set) => ({
 
 	hmrc_connection: "unknown",
 	set_hmrc_connection: (hmrc_connection) => set({ hmrc_connection }),
+
+	run_mode: "sandbox",
+	set_run_mode: (run_mode) => set({ run_mode }),
 }));

@@ -13,7 +13,11 @@ use std::path::PathBuf;
 // The settings file name lives next to the executable, as required by the spec.
 const SETTINGS_FILE_NAME: &str = "MyOpenUKTaxApp.settings.json";
 const WINDOW_STATE_FILE_NAME: &str = "MyOpenUKTaxApp.window.json";
+const RUN_MODE_FILE_NAME: &str = "MyOpenUKTaxApp.runmode.json";
 const DATABASE_FILE_NAME: &str = "MyOpenUKTaxApp.db";
+// Per-mode database files, attached as the `sandbox` / `production` schemas.
+const SANDBOX_DATABASE_FILE_NAME: &str = "MyOpenUKTaxApp.sandbox.db";
+const PRODUCTION_DATABASE_FILE_NAME: &str = "MyOpenUKTaxApp.production.db";
 
 #[derive(Debug, Clone)]
 pub struct AppPaths
@@ -53,16 +57,34 @@ impl AppPaths
 		self.base_directory.join(WINDOW_STATE_FILE_NAME)
 	}
 
+	// The exe-adjacent run-mode flag file (Sandbox vs Production).
+	pub fn run_mode_file(&self) -> PathBuf
+	{
+		self.base_directory.join(RUN_MODE_FILE_NAME)
+	}
+
 	// The Data/ subdirectory that holds the database and its backups.
 	pub fn data_directory(&self) -> PathBuf
 	{
 		self.base_directory.join("Data")
 	}
 
-	// The SQLite database file at Data/MyOpenUKTaxApp.db.
+	// The legacy single SQLite database file at Data/MyOpenUKTaxApp.db. Kept for the
+	// one-time migration that moves its contents into the sandbox schema file.
 	pub fn database_file(&self) -> PathBuf
 	{
 		self.data_directory().join(DATABASE_FILE_NAME)
+	}
+
+	// The per-mode database files, attached as the `sandbox` / `production` schemas.
+	pub fn sandbox_database_file(&self) -> PathBuf
+	{
+		self.data_directory().join(SANDBOX_DATABASE_FILE_NAME)
+	}
+
+	pub fn production_database_file(&self) -> PathBuf
+	{
+		self.data_directory().join(PRODUCTION_DATABASE_FILE_NAME)
 	}
 
 	// The Data/Backups subdirectory holding timestamped database copies.

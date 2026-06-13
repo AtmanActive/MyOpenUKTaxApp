@@ -9,6 +9,7 @@ use crate::error::AppError;
 use crate::error::AppResult;
 use crate::logging::Logger;
 use crate::paths::AppPaths;
+use crate::runmode::RunMode;
 use crate::settings::Settings;
 use crate::window_state::Geometry;
 use crate::window_state::WindowState;
@@ -23,6 +24,9 @@ pub struct AppState
 	pub settings: Mutex<Settings>,
 	pub logger: Arc<Logger>,
 	pub database: Arc<Mutex<Database>>,
+	// The active run mode (Sandbox / Production). Switchable at runtime; selects the
+	// DB schema and the HMRC credentials/endpoint.
+	pub run_mode: Mutex<RunMode>,
 	// Persisted window geometry/mode, plus the first normal geometry seen this
 	// session (the baseline used to tell whether the user moved/resized).
 	pub window_state: Mutex<WindowState>,
@@ -49,5 +53,14 @@ impl AppState
 		self.settings
 			.lock()
 			.map_err(|_| AppError::Internal("settings lock was poisoned".to_string()))
+	}
+
+	// The current run mode (copied out of the lock).
+	pub fn current_run_mode(&self) -> AppResult<RunMode>
+	{
+		self.run_mode
+			.lock()
+			.map(|mode| *mode)
+			.map_err(|_| AppError::Internal("run-mode lock was poisoned".to_string()))
 	}
 }

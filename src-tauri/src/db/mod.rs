@@ -1,9 +1,13 @@
 // SQLite data layer.
 //
-// All persistence goes through this module. It owns the single rusqlite
-// connection, applies schema migrations on open, seeds the default
-// subcategories, and takes "smart" pre-write backups (debounced so a batch of
-// writes produces one backup, not hundreds). Money is stored as integer pence.
+// Persistence is split into two parallel schemas — `sandbox` and `production` —
+// held in separate files (Data/MyOpenUKTaxApp.{sandbox,production}.db) and ATTACHed
+// to a single in-memory control connection. The two schemas have identical tables
+// but independent data. The `active_schema` selects which one every query targets;
+// switching it (when the run mode changes) is instant, with no reconnection.
+//
+// Money is stored as integer pence. Migrations run per schema (each attached file
+// carries its own PRAGMA user_version). Pre-write backups are "smart" (debounced).
 
 pub mod models;
 
@@ -23,59 +27,10 @@ use std::time::Instant;
 // Guard against absurd monetary input (one billion pounds), in pence.
 const MAX_AMOUNT_PENCE: i64 = 100_000_000_000;
 
-// The schema applied for a fresh database (PRAGMA user_version 0 -> 1).
-const SCHEMA_V1: &str = "
-CREATE TABLE subcategories (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	kind        TEXT NOT NULL CHECK (kind IN ('income','expense')),
-	name        TEXT NOT NULL,
-	description TEXT NOT NULL DEFAULT '',
-	created_at  TEXT NOT NULL,
-	UNIQUE (kind, name)
-);
+// The two schema names; also the ATTACH aliases and part of the backup filenames.
+const SCHEMAS: [&str; 2] = ["sandbox", "production"];
 
-CREATE TABLE ledger_events (
-	id             INTEGER PRIMARY KEY AUTOINCREMENT,
-	kind           TEXT NOT NULL CHECK (kind IN ('income','expense')),
-	event_date     TEXT NOT NULL,
-	subcategory_id INTEGER NOT NULL REFERENCES subcategories(id),
-	amount_pence   INTEGER NOT NULL CHECK (amount_pence >= 0),
-	note           TEXT NOT NULL DEFAULT '',
-	created_at     TEXT NOT NULL
-);
-CREATE INDEX idx_ledger_events_date ON ledger_events(event_date);
-CREATE INDEX idx_ledger_events_subcategory ON ledger_events(subcategory_id);
-
-CREATE TABLE hmrc_categories (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	code        TEXT NOT NULL UNIQUE,
-	kind        TEXT NOT NULL,
-	label       TEXT NOT NULL,
-	description TEXT NOT NULL DEFAULT '',
-	updated_at  TEXT NOT NULL
-);
-
-CREATE TABLE category_mappings (
-	id               INTEGER PRIMARY KEY AUTOINCREMENT,
-	subcategory_id   INTEGER NOT NULL UNIQUE REFERENCES subcategories(id),
-	hmrc_category_id INTEGER NOT NULL REFERENCES hmrc_categories(id),
-	created_at       TEXT NOT NULL
-);
-
-CREATE TABLE hmrc_submissions (
-	id            INTEGER PRIMARY KEY AUTOINCREMENT,
-	period_from   TEXT NOT NULL,
-	period_to     TEXT NOT NULL,
-	submitted_at  TEXT NOT NULL,
-	status        TEXT NOT NULL,
-	reference     TEXT NOT NULL DEFAULT '',
-	request_json  TEXT NOT NULL DEFAULT '',
-	response_json TEXT NOT NULL DEFAULT ''
-);
-";
-
-// The default subcategories every new database is seeded with, as listed in the
-// overview document: (kind, name).
+// The default subcategories every new schema is seeded with: (kind, name).
 const DEFAULT_SUBCATEGORIES: [(&str, &str); 6] = [
 	("income", "Main"),
 	("expense", "Phone"),
@@ -86,9 +41,8 @@ const DEFAULT_SUBCATEGORIES: [(&str, &str); 6] = [
 ];
 
 // The fixed HMRC self-employment income/expense categories defined by the MTD
-// Income Tax spec: (code, kind, label). These are seeded locally so the Category
-// Mapping screen is usable immediately; the same codes are used when building a
-// quarterly period-summary submission. They remain read-only to the user.
+// Income Tax spec: (code, kind, label). Seeded into each schema so the Category
+// Mapping screen works out of the box; the same codes build a period submission.
 const DEFAULT_HMRC_CATEGORIES: [(&str, &str, &str); 17] = [
 	("turnover", "income", "Turnover (takings, fees, sales or money earned)"),
 	("other", "income", "Any other business income"),
@@ -109,10 +63,67 @@ const DEFAULT_HMRC_CATEGORIES: [(&str, &str, &str); 17] = [
 	("otherExpenses", "expense", "Other business expenses"),
 ];
 
+// The v1 schema DDL for one schema (table/index names qualified with the schema;
+// REFERENCES stay unqualified so SQLite resolves them within the same schema).
+fn schema_v1_ddl(schema: &str) -> String
+{
+	format!(
+		"CREATE TABLE {schema}.subcategories (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind        TEXT NOT NULL CHECK (kind IN ('income','expense')),
+			name        TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			created_at  TEXT NOT NULL,
+			UNIQUE (kind, name)
+		);
+
+		CREATE TABLE {schema}.ledger_events (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind           TEXT NOT NULL CHECK (kind IN ('income','expense')),
+			event_date     TEXT NOT NULL,
+			subcategory_id INTEGER NOT NULL REFERENCES subcategories(id),
+			amount_pence   INTEGER NOT NULL CHECK (amount_pence >= 0),
+			note           TEXT NOT NULL DEFAULT '',
+			created_at     TEXT NOT NULL
+		);
+		CREATE INDEX {schema}.idx_ledger_events_date ON ledger_events(event_date);
+		CREATE INDEX {schema}.idx_ledger_events_subcategory ON ledger_events(subcategory_id);
+
+		CREATE TABLE {schema}.hmrc_categories (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			code        TEXT NOT NULL UNIQUE,
+			kind        TEXT NOT NULL,
+			label       TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			updated_at  TEXT NOT NULL
+		);
+
+		CREATE TABLE {schema}.category_mappings (
+			id               INTEGER PRIMARY KEY AUTOINCREMENT,
+			subcategory_id   INTEGER NOT NULL UNIQUE REFERENCES subcategories(id),
+			hmrc_category_id INTEGER NOT NULL REFERENCES hmrc_categories(id),
+			created_at       TEXT NOT NULL
+		);
+
+		CREATE TABLE {schema}.hmrc_submissions (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			period_from   TEXT NOT NULL,
+			period_to     TEXT NOT NULL,
+			submitted_at  TEXT NOT NULL,
+			status        TEXT NOT NULL,
+			reference     TEXT NOT NULL DEFAULT '',
+			request_json  TEXT NOT NULL DEFAULT '',
+			response_json TEXT NOT NULL DEFAULT ''
+		);"
+	)
+}
+
 pub struct Database
 {
 	connection: Connection,
 	paths: AppPaths,
+	// The schema every query currently targets ("sandbox" | "production").
+	active_schema: String,
 	// Retention/backup tuning copied from settings; refreshed when settings change.
 	backup_min_interval: Duration,
 	backups_pruned_after_days: u32,
@@ -122,97 +133,139 @@ pub struct Database
 
 impl Database
 {
-	// Open (creating if needed) the database, migrate it, and seed defaults.
+	// Open the control connection, ATTACH both schema files, migrate each, seed
+	// defaults, and select the starting schema. A pre-existing single-file database
+	// (Data/MyOpenUKTaxApp.db) is migrated once into the sandbox schema file.
 	pub fn open(
 		paths: &AppPaths,
 		backup_min_interval_seconds: u64,
 		backups_pruned_after_days: u32,
+		active_schema: &str,
 	) -> AppResult<Self>
 	{
-		let connection = Connection::open(paths.database_file())?;
+		// One-time migration: the legacy single DB becomes the sandbox schema.
+		let legacy = paths.database_file();
+		let sandbox_file = paths.sandbox_database_file();
+		if legacy.exists() && !sandbox_file.exists()
+		{
+			std::fs::rename(&legacy, &sandbox_file)?;
+		}
 
-		// Enforce foreign keys (off by default in SQLite) so mappings/events
-		// cannot reference missing rows.
+		// A throwaway in-memory control DB owns the connection; the real data lives
+		// in the two attached schema files.
+		let connection = Connection::open_in_memory()?;
 		connection.execute_batch("PRAGMA foreign_keys = ON;")?;
 
-		let mut database = Self {
+		// ATTACH each schema file under its schema name (created if missing). The
+		// path is escaped as a SQL string literal (single quotes doubled).
+		for schema in SCHEMAS
+		{
+			let file = match schema
+			{
+				"production" => paths.production_database_file(),
+				_ => paths.sandbox_database_file(),
+			};
+			let escaped = file.to_string_lossy().replace('\'', "''");
+			connection.execute_batch(&format!("ATTACH DATABASE '{escaped}' AS {schema};"))?;
+		}
+
+		let database = Self {
 			connection,
 			paths: paths.clone(),
+			active_schema: active_schema.to_string(),
 			backup_min_interval: Duration::from_secs(backup_min_interval_seconds),
 			backups_pruned_after_days,
 			last_backup_at: None,
 		};
 
-		database.run_migrations()?;
+		for schema in SCHEMAS
+		{
+			database.migrate_schema(schema)?;
+		}
+
 		Ok(database)
 	}
 
-	// Apply any outstanding schema migrations based on PRAGMA user_version.
-	fn run_migrations(&mut self) -> AppResult<()>
+	// Point subsequent queries at a different schema (run-mode switch). Instant —
+	// both schemas remain attached.
+	pub fn set_active_schema(&mut self, schema: &str)
 	{
-		let current_version: i64 =
-			self.connection
-				.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+		self.active_schema = schema.to_string();
+	}
 
-		// v0 -> v1: create the initial schema and seed default subcategories.
-		if current_version < 1
+	// Apply outstanding migrations to one schema, keyed by its own user_version.
+	fn migrate_schema(&self, schema: &str) -> AppResult<()>
+	{
+		let version: i64 = self
+			.connection
+			.query_row(&format!("PRAGMA {schema}.user_version"), [], |row| row.get(0))?;
+
+		// v0 -> v1: create the initial schema and seed defaults.
+		if version < 1
 		{
-			self.connection.execute_batch(SCHEMA_V1)?;
+			self.connection.execute_batch(&schema_v1_ddl(schema))?;
 
 			let now = Utc::now().to_rfc3339();
 			for (kind, name) in DEFAULT_SUBCATEGORIES
 			{
 				self.connection.execute(
-					"INSERT INTO subcategories (kind, name, description, created_at)
-					 VALUES (?1, ?2, '', ?3)",
+					&format!(
+						"INSERT INTO {schema}.subcategories (kind, name, description, created_at)
+						 VALUES (?1, ?2, '', ?3)"
+					),
 					params![kind, name, now],
 				)?;
 			}
-
-			// Seed the fixed HMRC category list so mapping works out of the box.
 			for (code, kind, label) in DEFAULT_HMRC_CATEGORIES
 			{
 				self.connection.execute(
-					"INSERT INTO hmrc_categories (code, kind, label, description, updated_at)
-					 VALUES (?1, ?2, ?3, '', ?4)",
+					&format!(
+						"INSERT INTO {schema}.hmrc_categories (code, kind, label, description, updated_at)
+						 VALUES (?1, ?2, ?3, '', ?4)"
+					),
 					params![code, kind, label, now],
 				)?;
 			}
-
-			self.connection.execute_batch("PRAGMA user_version = 1;")?;
+			self.connection
+				.execute_batch(&format!("PRAGMA {schema}.user_version = 1;"))?;
 		}
 
-		// v1 -> v2: a simple key/value table for small app metadata (e.g. when the
-		// sandbox test data was last seeded).
-		if current_version < 2
+		// v1 -> v2: a key/value table for small app metadata (per schema).
+		if version < 2
 		{
-			self.connection.execute_batch(
-				"CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-				 PRAGMA user_version = 2;",
-			)?;
+			self.connection.execute_batch(&format!(
+				"CREATE TABLE {schema}.app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+				 PRAGMA {schema}.user_version = 2;"
+			))?;
 		}
 
 		Ok(())
 	}
 
-	// Read a value from the app_meta key/value table (None if the key is absent).
+	// Read a value from the active schema's app_meta table (None if absent).
 	pub fn get_meta(&self, key: &str) -> AppResult<Option<String>>
 	{
+		let s = &self.active_schema;
 		let value = self
 			.connection
-			.query_row("SELECT value FROM app_meta WHERE key = ?1", params![key], |row| {
-				row.get::<_, String>(0)
-			})
+			.query_row(
+				&format!("SELECT value FROM {s}.app_meta WHERE key = ?1"),
+				params![key],
+				|row| row.get::<_, String>(0),
+			)
 			.optional()?;
 		Ok(value)
 	}
 
-	// Insert or update a value in the app_meta key/value table.
+	// Insert or update a value in the active schema's app_meta table.
 	pub fn set_meta(&self, key: &str, value: &str) -> AppResult<()>
 	{
+		let s = &self.active_schema;
 		self.connection.execute(
-			"INSERT INTO app_meta (key, value) VALUES (?1, ?2)
-			 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+			&format!(
+				"INSERT INTO {s}.app_meta (key, value) VALUES (?1, ?2)
+				 ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+			),
 			params![key, value],
 		)?;
 		Ok(())
@@ -229,9 +282,8 @@ impl Database
 		self.backups_pruned_after_days = backups_pruned_after_days;
 	}
 
-	// Take a backup before a mutation, but only if enough time has elapsed since
-	// the last one. This is the "smart" debounce that keeps a batch of writes
-	// from spawning a flood of near-identical backup files.
+	// Take a backup of the active schema before a mutation, debounced so a batch of
+	// writes produces one backup, not hundreds.
 	fn maybe_backup(&mut self) -> AppResult<()>
 	{
 		let is_due = match self.last_backup_at
@@ -239,53 +291,41 @@ impl Database
 			None => true,
 			Some(previous) => previous.elapsed() >= self.backup_min_interval,
 		};
-
 		if !is_due
 		{
 			return Ok(());
 		}
 
-		// VACUUM INTO writes a fully consistent copy of the database to a new
-		// file, which is safer than copying the live file's bytes.
-		let stamp = chrono::Local::now()
-			.format("%Y-%m-%d_%H-%M-%S-%3f")
-			.to_string();
+		let stamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S-%3f").to_string();
+		let schema = &self.active_schema;
 		let backup_path = self
 			.paths
 			.backups_directory()
-			.join(format!("{stamp}_MyOpenUKTaxApp.db"));
-		let backup_path_string = backup_path.to_string_lossy().to_string();
+			.join(format!("{stamp}_MyOpenUKTaxApp.{schema}.db"));
+		let escaped_path = backup_path.to_string_lossy().replace('\'', "''");
 
-		// VACUUM INTO does not accept a bound parameter for the destination, so
-		// build a statement with the path as an escaped SQL string literal
-		// (single quotes doubled) to remain injection-safe.
-		let escaped_path = backup_path_string.replace('\'', "''");
+		// `VACUUM <schema> INTO <file>` writes a consistent copy of just that schema.
 		self.connection
-			.execute_batch(&format!("VACUUM INTO '{escaped_path}'"))?;
+			.execute_batch(&format!("VACUUM {schema} INTO '{escaped_path}'"))?;
 
 		self.last_backup_at = Some(Instant::now());
-
-		// Opportunistically prune old backups after creating a new one.
 		housekeeping::prune_directory_by_age(
 			&self.paths.backups_directory(),
 			self.backups_pruned_after_days,
 		)?;
-
 		Ok(())
 	}
 
 	// ---- Subcategories ----------------------------------------------------
 
-	// List subcategories, optionally filtered to one kind, with an in_use flag
-	// computed from whether any ledger event references each subcategory.
 	pub fn list_subcategories(&self, kind: Option<&str>) -> AppResult<Vec<Subcategory>>
 	{
-		let mut sql = String::from(
+		let s = &self.active_schema;
+		let mut sql = format!(
 			"SELECT s.id, s.kind, s.name, s.description, s.created_at,
-			        EXISTS (SELECT 1 FROM ledger_events e WHERE e.subcategory_id = s.id)
-			 FROM subcategories s",
+			        EXISTS (SELECT 1 FROM {s}.ledger_events e WHERE e.subcategory_id = s.id)
+			 FROM {s}.subcategories s"
 		);
-
 		if kind.is_some()
 		{
 			sql.push_str(" WHERE s.kind = ?1");
@@ -303,17 +343,14 @@ impl Database
 				in_use: row.get(5)?,
 			})
 		};
-
 		let rows = match kind
 		{
 			Some(kind) => statement.query_map(params![kind], map_row)?,
 			None => statement.query_map([], map_row)?,
 		};
-
 		Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 	}
 
-	// Create a new subcategory after validating its kind and name.
 	pub fn create_subcategory(
 		&mut self,
 		kind: &str,
@@ -329,11 +366,13 @@ impl Database
 		}
 
 		self.maybe_backup()?;
-
+		let s = &self.active_schema;
 		let now = Utc::now().to_rfc3339();
 		self.connection.execute(
-			"INSERT INTO subcategories (kind, name, description, created_at)
-			 VALUES (?1, ?2, ?3, ?4)",
+			&format!(
+				"INSERT INTO {s}.subcategories (kind, name, description, created_at)
+				 VALUES (?1, ?2, ?3, ?4)"
+			),
 			params![kind, trimmed_name, description.trim(), now],
 		)?;
 
@@ -341,13 +380,15 @@ impl Database
 		self.get_subcategory(new_id)
 	}
 
-	// Fetch a single subcategory by id.
 	pub fn get_subcategory(&self, id: i64) -> AppResult<Subcategory>
 	{
+		let s = &self.active_schema;
 		let subcategory = self.connection.query_row(
-			"SELECT s.id, s.kind, s.name, s.description, s.created_at,
-			        EXISTS (SELECT 1 FROM ledger_events e WHERE e.subcategory_id = s.id)
-			 FROM subcategories s WHERE s.id = ?1",
+			&format!(
+				"SELECT s.id, s.kind, s.name, s.description, s.created_at,
+				        EXISTS (SELECT 1 FROM {s}.ledger_events e WHERE e.subcategory_id = s.id)
+				 FROM {s}.subcategories s WHERE s.id = ?1"
+			),
 			params![id],
 			|row| {
 				Ok(Subcategory {
@@ -360,11 +401,9 @@ impl Database
 				})
 			},
 		);
-
 		subcategory.map_err(|_| AppError::NotFound(format!("subcategory {id}")))
 	}
 
-	// Rename / re-describe a subcategory. The kind is intentionally immutable.
 	pub fn update_subcategory(
 		&mut self,
 		id: i64,
@@ -379,21 +418,18 @@ impl Database
 		}
 
 		self.maybe_backup()?;
-
+		let s = &self.active_schema;
 		let affected = self.connection.execute(
-			"UPDATE subcategories SET name = ?2, description = ?3 WHERE id = ?1",
+			&format!("UPDATE {s}.subcategories SET name = ?2, description = ?3 WHERE id = ?1"),
 			params![id, trimmed_name, description.trim()],
 		)?;
 		if affected == 0
 		{
 			return Err(AppError::NotFound(format!("subcategory {id}")));
 		}
-
 		self.get_subcategory(id)
 	}
 
-	// Delete a subcategory, but only if no ledger event references it. Once used,
-	// a subcategory may be renamed but never deleted.
 	pub fn delete_subcategory(&mut self, id: i64) -> AppResult<()>
 	{
 		let subcategory = self.get_subcategory(id)?;
@@ -405,29 +441,24 @@ impl Database
 		}
 
 		self.maybe_backup()?;
+		let s = &self.active_schema;
 		self.connection
-			.execute("DELETE FROM subcategories WHERE id = ?1", params![id])?;
+			.execute(&format!("DELETE FROM {s}.subcategories WHERE id = ?1"), params![id])?;
 		Ok(())
 	}
 
 	// ---- Ledger events ----------------------------------------------------
 
-	// List events of one kind, applying an optional date range and text filter.
-	pub fn list_events(
-		&self,
-		kind: &str,
-		filter: &EventFilter,
-	) -> AppResult<Vec<LedgerEvent>>
+	pub fn list_events(&self, kind: &str, filter: &EventFilter) -> AppResult<Vec<LedgerEvent>>
 	{
 		validate_kind(kind)?;
-
-		// Build the query with positional parameters bound in a stable order.
-		let mut sql = String::from(
+		let s = &self.active_schema;
+		let mut sql = format!(
 			"SELECT e.id, e.kind, e.event_date, e.subcategory_id, s.name,
 			        e.amount_pence, e.note, e.created_at
-			 FROM ledger_events e
-			 JOIN subcategories s ON s.id = e.subcategory_id
-			 WHERE e.kind = ?1",
+			 FROM {s}.ledger_events e
+			 JOIN {s}.subcategories s ON s.id = e.subcategory_id
+			 WHERE e.kind = ?1"
 		);
 		let mut bound: Vec<String> = vec![kind.to_string()];
 
@@ -463,19 +494,20 @@ impl Database
 				created_at: row.get(7)?,
 			})
 		})?;
-
 		Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 	}
 
-	// Fetch a single event (used by the Add Event "clone"/lookup mode).
 	pub fn get_event(&self, id: i64) -> AppResult<LedgerEvent>
 	{
+		let s = &self.active_schema;
 		let event = self.connection.query_row(
-			"SELECT e.id, e.kind, e.event_date, e.subcategory_id, s.name,
-			        e.amount_pence, e.note, e.created_at
-			 FROM ledger_events e
-			 JOIN subcategories s ON s.id = e.subcategory_id
-			 WHERE e.id = ?1",
+			&format!(
+				"SELECT e.id, e.kind, e.event_date, e.subcategory_id, s.name,
+				        e.amount_pence, e.note, e.created_at
+				 FROM {s}.ledger_events e
+				 JOIN {s}.subcategories s ON s.id = e.subcategory_id
+				 WHERE e.id = ?1"
+			),
 			params![id],
 			|row| {
 				Ok(LedgerEvent {
@@ -490,12 +522,9 @@ impl Database
 				})
 			},
 		);
-
 		event.map_err(|_| AppError::NotFound(format!("event {id}")))
 	}
 
-	// Insert a ledger event after validating the date, amount and that the chosen
-	// subcategory exists and shares the event's kind.
 	pub fn create_event(&mut self, input: &NewLedgerEvent) -> AppResult<LedgerEvent>
 	{
 		validate_kind(&input.kind)?;
@@ -503,12 +532,9 @@ impl Database
 
 		if input.amount_pence < 0 || input.amount_pence > MAX_AMOUNT_PENCE
 		{
-			return Err(AppError::Validation(
-				"amount is out of the allowed range".to_string(),
-			));
+			return Err(AppError::Validation("amount is out of the allowed range".to_string()));
 		}
 
-		// The subcategory must exist and belong to the same kind as the event.
 		let subcategory = self.get_subcategory(input.subcategory_id)?;
 		if subcategory.kind != input.kind
 		{
@@ -519,12 +545,14 @@ impl Database
 		}
 
 		self.maybe_backup()?;
-
+		let s = &self.active_schema;
 		let now = Utc::now().to_rfc3339();
 		self.connection.execute(
-			"INSERT INTO ledger_events
-			 (kind, event_date, subcategory_id, amount_pence, note, created_at)
-			 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+			&format!(
+				"INSERT INTO {s}.ledger_events
+				 (kind, event_date, subcategory_id, amount_pence, note, created_at)
+				 VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+			),
 			params![
 				input.kind,
 				input.event_date,
@@ -539,13 +567,13 @@ impl Database
 		self.get_event(new_id)
 	}
 
-	// Delete a ledger event by id.
 	pub fn delete_event(&mut self, id: i64) -> AppResult<()>
 	{
 		self.maybe_backup()?;
+		let s = &self.active_schema;
 		let affected = self
 			.connection
-			.execute("DELETE FROM ledger_events WHERE id = ?1", params![id])?;
+			.execute(&format!("DELETE FROM {s}.ledger_events WHERE id = ?1"), params![id])?;
 		if affected == 0
 		{
 			return Err(AppError::NotFound(format!("event {id}")));
@@ -553,14 +581,14 @@ impl Database
 		Ok(())
 	}
 
-	// The subcategory of the most recently created event of a kind ("last used"),
-	// or None if no events of that kind exist yet. Ordered by id so it reflects
-	// creation order rather than the user-set event date.
 	pub fn last_used_subcategory_id(&self, kind: &str) -> AppResult<Option<i64>>
 	{
 		validate_kind(kind)?;
+		let s = &self.active_schema;
 		let result = self.connection.query_row(
-			"SELECT subcategory_id FROM ledger_events WHERE kind = ?1 ORDER BY id DESC LIMIT 1",
+			&format!(
+				"SELECT subcategory_id FROM {s}.ledger_events WHERE kind = ?1 ORDER BY id DESC LIMIT 1"
+			),
 			params![kind],
 			|row| row.get::<_, i64>(0),
 		);
@@ -574,12 +602,11 @@ impl Database
 
 	// ---- HMRC categories (read-only to the user) --------------------------
 
-	// List the HMRC categories cached locally, optionally filtered by kind.
 	pub fn list_hmrc_categories(&self, kind: Option<&str>) -> AppResult<Vec<HmrcCategory>>
 	{
-		let mut sql = String::from(
-			"SELECT id, code, kind, label, description, updated_at FROM hmrc_categories",
-		);
+		let s = &self.active_schema;
+		let mut sql =
+			format!("SELECT id, code, kind, label, description, updated_at FROM {s}.hmrc_categories");
 		if kind.is_some()
 		{
 			sql.push_str(" WHERE kind = ?1");
@@ -597,7 +624,6 @@ impl Database
 				updated_at: row.get(5)?,
 			})
 		};
-
 		let rows = match kind
 		{
 			Some(kind) => statement.query_map(params![kind], map_row)?,
@@ -606,9 +632,6 @@ impl Database
 		Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 	}
 
-	// Insert or update an HMRC category by its unique code. Reserved for syncing
-	// the read-only HMRC category list from the MTD API; the categories are
-	// seeded statically for now, so this is not yet called from a command.
 	#[allow(dead_code)]
 	pub fn upsert_hmrc_category(
 		&mut self,
@@ -619,15 +642,18 @@ impl Database
 	) -> AppResult<()>
 	{
 		self.maybe_backup()?;
+		let s = &self.active_schema;
 		let now = Utc::now().to_rfc3339();
 		self.connection.execute(
-			"INSERT INTO hmrc_categories (code, kind, label, description, updated_at)
-			 VALUES (?1, ?2, ?3, ?4, ?5)
-			 ON CONFLICT(code) DO UPDATE SET
-			     kind = excluded.kind,
-			     label = excluded.label,
-			     description = excluded.description,
-			     updated_at = excluded.updated_at",
+			&format!(
+				"INSERT INTO {s}.hmrc_categories (code, kind, label, description, updated_at)
+				 VALUES (?1, ?2, ?3, ?4, ?5)
+				 ON CONFLICT(code) DO UPDATE SET
+				     kind = excluded.kind,
+				     label = excluded.label,
+				     description = excluded.description,
+				     updated_at = excluded.updated_at"
+			),
 			params![code, kind, label, description, now],
 		)?;
 		Ok(())
@@ -635,17 +661,17 @@ impl Database
 
 	// ---- Category mappings ------------------------------------------------
 
-	// List all mappings joined with their subcategory and HMRC category labels.
 	pub fn list_mappings(&self) -> AppResult<Vec<CategoryMapping>>
 	{
-		let mut statement = self.connection.prepare(
+		let s = &self.active_schema;
+		let mut statement = self.connection.prepare(&format!(
 			"SELECT m.id, m.subcategory_id, s.kind, s.name,
 			        m.hmrc_category_id, h.code, h.label, m.created_at
-			 FROM category_mappings m
-			 JOIN subcategories s ON s.id = m.subcategory_id
-			 JOIN hmrc_categories h ON h.id = m.hmrc_category_id
-			 ORDER BY s.kind, s.name",
-		)?;
+			 FROM {s}.category_mappings m
+			 JOIN {s}.subcategories s ON s.id = m.subcategory_id
+			 JOIN {s}.hmrc_categories h ON h.id = m.hmrc_category_id
+			 ORDER BY s.kind, s.name"
+		))?;
 		let rows = statement.query_map([], |row| {
 			Ok(CategoryMapping {
 				id: row.get(0)?,
@@ -661,42 +687,43 @@ impl Database
 		Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 	}
 
-	// Create or replace the single mapping for a subcategory (many subcategories
-	// may point at the same HMRC category, hence upsert on subcategory_id).
 	pub fn set_mapping(&mut self, input: &NewCategoryMapping) -> AppResult<()>
 	{
 		self.maybe_backup()?;
+		let s = &self.active_schema;
 		let now = Utc::now().to_rfc3339();
 		self.connection.execute(
-			"INSERT INTO category_mappings (subcategory_id, hmrc_category_id, created_at)
-			 VALUES (?1, ?2, ?3)
-			 ON CONFLICT(subcategory_id) DO UPDATE SET
-			     hmrc_category_id = excluded.hmrc_category_id,
-			     created_at = excluded.created_at",
+			&format!(
+				"INSERT INTO {s}.category_mappings (subcategory_id, hmrc_category_id, created_at)
+				 VALUES (?1, ?2, ?3)
+				 ON CONFLICT(subcategory_id) DO UPDATE SET
+				     hmrc_category_id = excluded.hmrc_category_id,
+				     created_at = excluded.created_at"
+			),
 			params![input.subcategory_id, input.hmrc_category_id, now],
 		)?;
 		Ok(())
 	}
 
-	// Remove a mapping by id.
 	pub fn delete_mapping(&mut self, id: i64) -> AppResult<()>
 	{
 		self.maybe_backup()?;
+		let s = &self.active_schema;
 		self.connection
-			.execute("DELETE FROM category_mappings WHERE id = ?1", params![id])?;
+			.execute(&format!("DELETE FROM {s}.category_mappings WHERE id = ?1"), params![id])?;
 		Ok(())
 	}
 
 	// ---- HMRC submissions (post history) ----------------------------------
 
-	// List the quarterly submission history, newest first.
 	pub fn list_submissions(&self) -> AppResult<Vec<HmrcSubmission>>
 	{
-		let mut statement = self.connection.prepare(
+		let s = &self.active_schema;
+		let mut statement = self.connection.prepare(&format!(
 			"SELECT id, period_from, period_to, submitted_at, status, reference,
 			        request_json, response_json
-			 FROM hmrc_submissions ORDER BY submitted_at DESC, id DESC",
-		)?;
+			 FROM {s}.hmrc_submissions ORDER BY submitted_at DESC, id DESC"
+		))?;
 		let rows = statement.query_map([], |row| {
 			Ok(HmrcSubmission {
 				id: row.get(0)?,
@@ -712,7 +739,6 @@ impl Database
 		Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 	}
 
-	// Record a submission attempt (success or failure) in the history table.
 	pub fn record_submission(
 		&mut self,
 		period_from: &str,
@@ -724,19 +750,24 @@ impl Database
 	) -> AppResult<HmrcSubmission>
 	{
 		self.maybe_backup()?;
+		let s = &self.active_schema;
 		let now = Utc::now().to_rfc3339();
 		self.connection.execute(
-			"INSERT INTO hmrc_submissions
-			 (period_from, period_to, submitted_at, status, reference, request_json, response_json)
-			 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+			&format!(
+				"INSERT INTO {s}.hmrc_submissions
+				 (period_from, period_to, submitted_at, status, reference, request_json, response_json)
+				 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+			),
 			params![period_from, period_to, now, status, reference, request_json, response_json],
 		)?;
 		let new_id = self.connection.last_insert_rowid();
 
 		let submission = self.connection.query_row(
-			"SELECT id, period_from, period_to, submitted_at, status, reference,
-			        request_json, response_json
-			 FROM hmrc_submissions WHERE id = ?1",
+			&format!(
+				"SELECT id, period_from, period_to, submitted_at, status, reference,
+				        request_json, response_json
+				 FROM {s}.hmrc_submissions WHERE id = ?1"
+			),
 			params![new_id],
 			|row| {
 				Ok(HmrcSubmission {
@@ -756,15 +787,12 @@ impl Database
 
 	// ---- Dashboard aggregation -------------------------------------------
 
-	// Compute income/expense totals and a per-subcategory breakdown for a window.
-	// Empty date bounds mean "unbounded" on that side.
 	pub fn dashboard_summary(
 		&self,
 		date_from: Option<&str>,
 		date_to: Option<&str>,
 	) -> AppResult<DashboardSummary>
 	{
-		// Reuse the event filter so the date-window logic lives in one place.
 		let filter = EventFilter {
 			date_from: date_from.map(|value| value.to_string()),
 			date_to: date_to.map(|value| value.to_string()),
@@ -777,7 +805,6 @@ impl Database
 		let total_income_pence: i64 = income_events.iter().map(|event| event.amount_pence).sum();
 		let total_expense_pence: i64 = expense_events.iter().map(|event| event.amount_pence).sum();
 
-		// Aggregate per-subcategory totals across both kinds for the breakdown.
 		let mut breakdown: Vec<SubcategoryTotal> = Vec::new();
 		for event in income_events.iter().chain(expense_events.iter())
 		{
@@ -815,10 +842,6 @@ impl Database
 
 	// ---- HMRC submission aggregation -------------------------------------
 
-	// Sum ledger amounts grouped by the mapped HMRC category code over a date
-	// window. Events whose subcategory has no mapping are excluded; the caller
-	// can warn about those via `unmapped_event_count`. Returns (code, kind,
-	// total_pence) tuples.
 	pub fn period_totals_by_hmrc_code(
 		&self,
 		date_from: &str,
@@ -827,32 +850,33 @@ impl Database
 	{
 		validate_date(date_from)?;
 		validate_date(date_to)?;
-
-		let mut statement = self.connection.prepare(
+		let s = &self.active_schema;
+		let mut statement = self.connection.prepare(&format!(
 			"SELECT h.code, h.kind, SUM(e.amount_pence)
-			 FROM ledger_events e
-			 JOIN category_mappings m ON m.subcategory_id = e.subcategory_id
-			 JOIN hmrc_categories h ON h.id = m.hmrc_category_id
+			 FROM {s}.ledger_events e
+			 JOIN {s}.category_mappings m ON m.subcategory_id = e.subcategory_id
+			 JOIN {s}.hmrc_categories h ON h.id = m.hmrc_category_id
 			 WHERE e.event_date >= ?1 AND e.event_date <= ?2
-			 GROUP BY h.code, h.kind",
-		)?;
+			 GROUP BY h.code, h.kind"
+		))?;
 		let rows = statement.query_map(params![date_from, date_to], |row| {
 			Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
 		})?;
 		Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 	}
 
-	// Count events in the window whose subcategory has no HMRC mapping, so the
-	// submission flow can warn that those amounts will be omitted.
 	pub fn unmapped_event_count(&self, date_from: &str, date_to: &str) -> AppResult<i64>
 	{
+		let s = &self.active_schema;
 		let count: i64 = self.connection.query_row(
-			"SELECT COUNT(*)
-			 FROM ledger_events e
-			 WHERE e.event_date >= ?1 AND e.event_date <= ?2
-			   AND NOT EXISTS (
-			       SELECT 1 FROM category_mappings m WHERE m.subcategory_id = e.subcategory_id
-			   )",
+			&format!(
+				"SELECT COUNT(*)
+				 FROM {s}.ledger_events e
+				 WHERE e.event_date >= ?1 AND e.event_date <= ?2
+				   AND NOT EXISTS (
+				       SELECT 1 FROM {s}.category_mappings m WHERE m.subcategory_id = e.subcategory_id
+				   )"
+			),
 			params![date_from, date_to],
 			|row| row.get(0),
 		)?;

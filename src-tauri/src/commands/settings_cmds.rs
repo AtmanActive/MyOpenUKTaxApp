@@ -40,10 +40,17 @@ pub fn update_settings(
 		let current = state.lock_settings()?;
 		previous_logs_pruned_after_days = current.logs_pruned_after_days;
 		incoming.device_id = current.device_id.clone();
-		incoming.hmrc.access_token = current.hmrc.access_token.clone();
-		incoming.hmrc.refresh_token = current.hmrc.refresh_token.clone();
-		incoming.hmrc.token_expires_at_epoch_seconds =
-			current.hmrc.token_expires_at_epoch_seconds;
+		// OAuth tokens are backend-managed for BOTH modes; never let the UI clear them.
+		for block in [
+			(&mut incoming.hmrc_sandbox, &current.hmrc_sandbox),
+			(&mut incoming.hmrc_production, &current.hmrc_production),
+		]
+		{
+			let (into, from) = block;
+			into.access_token = from.access_token.clone();
+			into.refresh_token = from.refresh_token.clone();
+			into.token_expires_at_epoch_seconds = from.token_expires_at_epoch_seconds;
+		}
 	}
 
 	// Persist to the exe-adjacent JSON file (this also validates the values).
