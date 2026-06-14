@@ -5,7 +5,7 @@ UK HMRC MTD desktop application for the self-employed.
 A portable, cross-platform desktop app for simple self-employment accounting
 (income & expenses) that can submit quarterly data directly to
 [HMRC Making Tax Digital for Income Tax](https://www.gov.uk/government/collections/making-tax-digital-for-income-tax)
-via the [HMRC API](https://developer.service.hmrc.gov.uk/api-documentation).
+via the [HMRC API](https://developer.service.hmrc.gov.uk/api-documentation). Includes an MCP server!
 
 ## Current Status
 The app is currently in heavy development. The changes are happening daily. The releases are usually a week behind.
