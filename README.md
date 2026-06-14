@@ -7,6 +7,10 @@ A portable, cross-platform desktop app for simple self-employment accounting
 [HMRC Making Tax Digital for Income Tax](https://www.gov.uk/government/collections/making-tax-digital-for-income-tax)
 via the [HMRC API](https://developer.service.hmrc.gov.uk/api-documentation).
 
+## Current Status
+The app is currently in heavy development. The changes are happening daily. The releases are usually a week behind.
+
+
 ## Stack
 
 - **Tauri 2** desktop shell (Rust backend)
